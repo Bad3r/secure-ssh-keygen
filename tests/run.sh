@@ -202,6 +202,25 @@ case_missing_config() {
   assert_contains "Config file not found" "$err" "missing config should fail loudly"
 }
 
+case_missing_implicit_default_config_warns() {
+  local tmp script_copy out err rc
+
+  tmp="$(new_tempdir)"
+  script_copy="$tmp/sss-ssh-keygen.sh"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  cp "$script_path" "$script_copy"
+  chmod +x "$script_copy"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" "$script_copy" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "missing implicit default config should fall back to built-in defaults"
+  assert_contains "warning: Default config file not found: $tmp/sss-ssh-keygen.conf; continuing with built-in defaults" "$err" "missing implicit default config should warn"
+  assert_contains "profile: ed25519" "$out" "missing implicit default config should still use built-in defaults"
+  assert_contains "-a 100" "$out" "missing implicit default config should preserve built-in rounds"
+}
+
 case_config_not_executed() {
   local tmp cfg marker out err rc
 
@@ -493,6 +512,72 @@ case_force_overwrite_replaces_after_success() {
   assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "public key should be replaced after success"
 }
 
+case_force_overwrite_honors_passthrough_output() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$tmp/custom/id_override"
+  mkdir -p "$bin" "$home/.ssh" "$(dirname -- "$target")"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    "$script_path" --force-overwrite -- -f "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "passthrough -f should participate in overwrite handling"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "passthrough -f target private key should be replaced"
+  assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "passthrough -f target public key should be replaced"
+  assert_not_exists "$home/.ssh/id_ed25519" "passthrough -f should bypass the default output path"
+  assert_not_contains "cannot stat" "$err" "passthrough -f overwrite should not fail during the rename step"
+}
+
+case_force_overwrite_rejects_private_directory_target() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$tmp/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh" "$target"
+  write_stub_binaries "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    "$script_path" --force-overwrite --output "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "directory private targets should be rejected"
+  assert_contains "Refusing to overwrite directory target: $target" "$err" "directory private targets should report a clear error"
+  assert_not_exists "$target/id_ed25519" "directory private targets should not receive nested key files"
+}
+
+case_force_overwrite_rejects_public_directory_target() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$tmp/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh" "${target}.pub"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    "$script_path" --force-overwrite --output "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "directory public targets should be rejected"
+  assert_contains "Refusing to overwrite directory target: ${target}.pub" "$err" "directory public targets should report a clear error"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "directory public target failures should preserve the private key"
+  assert_not_exists "${target}.pub/id_ed25519.pub" "directory public targets should not receive nested public key files"
+}
+
 case_managed_dir_permissions_warn_and_fix() {
   local tmp bin home out err rc mode
 
@@ -541,6 +626,7 @@ run_case "missing profile value" case_missing_profile_value
 run_case "missing config value" case_missing_config_value
 run_case "config equals syntax" case_config_equals
 run_case "missing config" case_missing_config
+run_case "missing implicit default config warns" case_missing_implicit_default_config_warns
 run_case "config parsing is non-executable" case_config_not_executed
 run_case "config rejects unknown keys" case_config_rejects_unknown_key
 run_case "config rejects duplicates" case_config_rejects_duplicates
@@ -558,6 +644,9 @@ run_case "comment builder supports email" case_comment_builder_supports_email
 run_case "fido version gates" case_fido_version_gates
 run_case "overwrite preserves existing keys" case_force_overwrite_preserves_existing_keys
 run_case "overwrite replaces after success" case_force_overwrite_replaces_after_success
+run_case "overwrite honors passthrough output" case_force_overwrite_honors_passthrough_output
+run_case "overwrite rejects private directory targets" case_force_overwrite_rejects_private_directory_target
+run_case "overwrite rejects public directory targets" case_force_overwrite_rejects_public_directory_target
 run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_fix
 run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
 

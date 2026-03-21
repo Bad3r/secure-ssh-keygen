@@ -691,11 +691,29 @@ derive_effective_keygen_overrides() {
   else
     effective_verify_required=0
   fi
+  effective_output="$output"
+  forwarded_ssh_keygen_args=()
 
   while (($#)); do
     case "$1" in
+    -f)
+      if (($# < 2)); then
+        forwarded_ssh_keygen_args+=("$1")
+        break
+      fi
+      effective_output="$2"
+      shift 2
+      ;;
+    -f*)
+      effective_output="${1#-f}"
+      shift
+      ;;
     -t)
-      (($# >= 2)) || break
+      if (($# < 2)); then
+        forwarded_ssh_keygen_args+=("$1")
+        break
+      fi
+      forwarded_ssh_keygen_args+=("$1" "$2")
       effective_key_type="$2"
       if [[ "$effective_key_type" != *"-sk" ]]; then
         effective_verify_required=0
@@ -703,6 +721,7 @@ derive_effective_keygen_overrides() {
       shift 2
       ;;
     -t*)
+      forwarded_ssh_keygen_args+=("$1")
       effective_key_type="${1#-t}"
       if [[ "$effective_key_type" != *"-sk" ]]; then
         effective_verify_required=0
@@ -710,19 +729,25 @@ derive_effective_keygen_overrides() {
       shift
       ;;
     -O)
-      (($# >= 2)) || break
+      if (($# < 2)); then
+        forwarded_ssh_keygen_args+=("$1")
+        break
+      fi
+      forwarded_ssh_keygen_args+=("$1" "$2")
       if [[ "$2" == "verify-required" ]]; then
         effective_verify_required=1
       fi
       shift 2
       ;;
     -O*)
+      forwarded_ssh_keygen_args+=("$1")
       if [[ "${1#-O}" == "verify-required" ]]; then
         effective_verify_required=1
       fi
       shift
       ;;
     *)
+      forwarded_ssh_keygen_args+=("$1")
       shift
       ;;
     esac
@@ -749,14 +774,33 @@ cleanup_temp_artifacts() {
 }
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-config_path="${SSS_SSH_KEYGEN_CONFIG:-${SSH_KEYGEN_SECURE_CONFIG:-$script_dir/sss-ssh-keygen.conf}}"
+default_config_path="$script_dir/sss-ssh-keygen.conf"
+config_path="$default_config_path"
+config_path_source="implicit-default"
+if [[ -n "${SSH_KEYGEN_SECURE_CONFIG:-}" ]]; then
+  config_path="$SSH_KEYGEN_SECURE_CONFIG"
+  config_path_source="env"
+fi
+if [[ -n "${SSS_SSH_KEYGEN_CONFIG:-}" ]]; then
+  config_path="$SSS_SSH_KEYGEN_CONFIG"
+  config_path_source="env"
+fi
 extra_ssh_keygen_args=()
+forwarded_ssh_keygen_args=()
 
 parse_cli "$@"
 if state_is_set "cli" "config_path"; then
   config_path="$(state_value "cli" "config_path")"
+  config_path_source="cli"
 fi
-load_config_file "$config_path"
+
+if [[ -e "$config_path" ]]; then
+  load_config_file "$config_path"
+elif [[ "$config_path_source" == "implicit-default" ]]; then
+  warn "Default config file not found: $config_path; continuing with built-in defaults"
+else
+  load_config_file "$config_path"
+fi
 
 capture_env_values
 
@@ -887,17 +931,15 @@ if [[ -z "$output" ]]; then
   output="$managed_output_dir/$default_output_basename"
 fi
 
-output_dir="$(dirname -- "$output")"
-if [[ -z "${managed_output_dir:-}" ]]; then
-  managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
-fi
-
 if [[ -z "$comment" ]]; then
   comment="$(build_default_comment)"
 fi
 
 derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
 validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
+output="$effective_output"
+output_dir="$(dirname -- "$output")"
+managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
 
 display_cmd=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$output")
 if [[ "$key_type" == "rsa" ]]; then
@@ -918,8 +960,8 @@ if [[ "$key_type" == *"-sk" ]]; then
     display_cmd+=(-O resident)
   fi
 fi
-if ((${#extra_ssh_keygen_args[@]})); then
-  display_cmd+=("${extra_ssh_keygen_args[@]}")
+if ((${#forwarded_ssh_keygen_args[@]})); then
+  display_cmd+=("${forwarded_ssh_keygen_args[@]}")
 fi
 
 if [[ "$dry_run" -eq 1 ]]; then
@@ -938,6 +980,11 @@ if [[ ! -d "$output_dir" ]]; then
 fi
 
 repair_managed_dir_permissions "$managed_output_dir"
+
+if [[ "$force_overwrite" -eq 1 ]]; then
+  [[ -d "$output" ]] && die "Refusing to overwrite directory target: $output"
+  [[ -d "${output}.pub" ]] && die "Refusing to overwrite directory target: ${output}.pub"
+fi
 
 if [[ -e "$output" || -e "${output}.pub" ]] && [[ "$force_overwrite" -ne 1 ]]; then
   die "Refusing to overwrite existing key material at $output. Use --force-overwrite if replacement is intentional."
@@ -973,8 +1020,8 @@ if [[ "$key_type" == *"-sk" ]]; then
     cmd+=(-O resident)
   fi
 fi
-if ((${#extra_ssh_keygen_args[@]})); then
-  cmd+=("${extra_ssh_keygen_args[@]}")
+if ((${#forwarded_ssh_keygen_args[@]})); then
+  cmd+=("${forwarded_ssh_keygen_args[@]}")
 fi
 
 printf 'Executing:'
