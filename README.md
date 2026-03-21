@@ -14,12 +14,13 @@ defaults, then manage transport policy and token lifecycle separately.
 
 ## Requirements and compatibility
 
-- Bash is required; the wrapper is implemented as a Bash script.
+- Bash is required; the wrapper is implemented as a Bash script and remains
+  compatible with Bash 3.2 for stock macOS `/bin/bash`.
 - OpenSSH is required. FIDO-backed SSH keys require OpenSSH 8.2 or newer.
-- The `verify-required` option used by the hardware profiles requires OpenSSH
-  8.3 or newer.
-- The default hardware profile uses `ed25519-sk`. Use this when your
-  authenticator and estate support Ed25519-backed FIDO SSH credentials.
+- The default `verify-required` hardware mode requires OpenSSH 8.4 or newer.
+- The `hardware` profile uses a configurable FIDO algorithm and defaults to
+  `ed25519-sk`. Use this when your authenticator and estate support
+  Ed25519-backed FIDO SSH credentials.
 - Use `fido-ecdsa` or `--fido-algorithm ecdsa-sk` for older tokens or for
   environments that do not support `ed25519-sk`.
 - Use the `fips` or `rsa3072` profile when policy or interoperability requires
@@ -51,6 +52,12 @@ Generate the default hardware-backed key:
 ./sss-ssh-keygen.sh --profile hardware
 ```
 
+Place the default key under the XDG config directory:
+
+```sh
+./sss-ssh-keygen.sh --use-xdg-output
+```
+
 Generate an RSA fallback key:
 
 ```sh
@@ -62,10 +69,11 @@ Generate an RSA fallback key:
 | Profile | Default algorithm | Intended use | Compatibility note |
 | --- | --- | --- | --- |
 | `ed25519` / `software` | `ed25519` | General-purpose software key | Preferred default for modern OpenSSH estates |
-| `hardware` / `fido-ed25519` | `ed25519-sk -O verify-required` | Modern FIDO-backed key | Requires token and estate support for Ed25519 FIDO SSH keys |
+| `hardware` | `ed25519-sk -O verify-required` | Modern FIDO-backed key with configurable FIDO algorithm | Defaults to `ed25519-sk`, can be switched to `ecdsa-sk` |
+| `fido-ed25519` | `ed25519-sk -O verify-required` | Fixed Ed25519 FIDO-backed key | Always uses `ed25519-sk` |
 | `fido-ecdsa` | `ecdsa-sk -O verify-required` | Hardware-backed compatibility path | Use for older authenticators or estates without `ed25519-sk` |
-| `rsa3072` / `compat` | `rsa -b 3072` | Conservative compatibility path | Uses RSA with SHA-2 signatures |
-| `rsa4096` | `rsa -b 4096` | Policy-driven larger RSA key | Use only when an explicit standard requires it |
+| `rsa3072` / `compat` | `rsa -b 3072` | Conservative compatibility path | Uses RSA with SHA-2 signatures and forces 3072 bits |
+| `rsa4096` | `rsa -b 4096` | Policy-driven larger RSA key | Use only when an explicit standard requires it; forces 4096 bits |
 | `fips` | `rsa -b 3072` | FIPS-oriented or policy-constrained estate | Provided as an explicit RSA alias |
 
 The shipped defaults are:
@@ -79,30 +87,50 @@ The shipped defaults are:
 ## Configuration model
 
 The wrapper loads `sss-ssh-keygen.conf` from the repository root by default.
-That file is intended to be edited directly when you want a persistent local
-policy.
+Use `--config PATH` or `--config=PATH` to load an alternate file. Config files
+are assignment-only: use plain `KEY=VALUE` lines, optionally quoted, and avoid
+shell syntax or commands.
+
+Exported `SSH_KEYGEN_*` variables remain supported for one-off overrides. The
+effective precedence is: built-in defaults, then config-file values, then
+exported environment overrides, then explicit CLI flags.
 
 Supported configuration variables include:
 
 - `SSH_KEYGEN_PROFILE`
 - `SSH_KEYGEN_OUTPUT`
 - `SSH_KEYGEN_COMMENT`
+- `SSH_KEYGEN_COMMENT_USER`
+- `SSH_KEYGEN_COMMENT_HOST`
+- `SSH_KEYGEN_COMMENT_EMAIL`
 - `SSH_KEYGEN_KDF_ROUNDS`
 - `SSH_KEYGEN_CIPHER`
 - `SSH_KEYGEN_RSA_BITS`
 - `SSH_KEYGEN_EMPTY_PASSPHRASE`
 - `SSH_KEYGEN_QUIET`
 - `SSH_KEYGEN_DRY_RUN`
+- `SSH_KEYGEN_USE_XDG_OUTPUT`
 - `SSH_KEYGEN_FIDO_ALGORITHM`
 - `SSH_KEYGEN_FIDO_APPLICATION`
 - `SSH_KEYGEN_FIDO_VERIFY_REQUIRED`
 - `SSH_KEYGEN_FIDO_RESIDENT`
+
+For fixed RSA profiles, the profile name wins over `SSH_KEYGEN_RSA_BITS`:
+`rsa3072` always uses 3072 bits and `rsa4096` always uses 4096 bits. Use the
+`fips` profile when you need a configurable RSA bit size.
 
 To use a different config file for a specific run:
 
 ```sh
 ./sss-ssh-keygen.sh --config /path/to/custom.conf --dry-run
 ```
+
+Use `--use-xdg-output` when you want the default output path under
+`$XDG_CONFIG_HOME/ssh` or, if that is unset, `$HOME/.config/ssh`.
+
+The generated comment defaults to `user@host - YYYY-MM-DD`. Use
+`--comment-user`, `--comment-host`, or `--comment-email` to refine the auto
+comment without replacing it entirely. Use `--comment` for a full override.
 
 ## Operational notes
 
@@ -111,10 +139,13 @@ To use a different config file for a specific run:
 - Existing output paths are protected by default. Use `--force-overwrite` only
   when replacement is intentional.
 - The wrapper uses the OpenSSH private-key format and explicitly sets
-  `aes256-ctr` for private-key encryption.
+  `aes256-ctr` for private-key encryption, matching current `ssh-keygen`
+  defaults.
 - The shipped KDF default is `100` bcrypt_pbkdf rounds. OpenSSH defaults to
   `16`; this project raises the cost as a practical baseline for current
   workstations.
+- Extra arguments after `--` are an expert escape hatch. They are forwarded as
+  given and can override wrapper-managed `ssh-keygen` options.
 - Resident keys are not the default. Enable them explicitly with
   `--fido-resident` if portability across hosts is worth the theft tradeoff for
   your use case.
