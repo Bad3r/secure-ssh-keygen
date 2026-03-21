@@ -12,12 +12,17 @@ Run the relevant checks from the repository root:
 
 ```sh
 bash -n sss-ssh-keygen.sh
+bash tests/run.sh
 ./sss-ssh-keygen.sh --dry-run
+./sss-ssh-keygen.sh --config=./sss-ssh-keygen.conf --dry-run
+./sss-ssh-keygen.sh --config /tmp/definitely-missing.conf --dry-run
 ./sss-ssh-keygen.sh --profile hardware --dry-run
 ./sss-ssh-keygen.sh --profile fips --dry-run
 ```
 
 If you change validation or profile logic, test both success and refusal paths.
+Include config parsing checks such as `--config=...` support and a missing
+config failure.
 
 ## Pull request expectations
 
