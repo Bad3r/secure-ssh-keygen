@@ -79,7 +79,7 @@ Options:
   --comment-email TEXT         append email to the generated comment
   --rounds N                   bcrypt_pbkdf rounds
   --cipher NAME                private-key encryption cipher, default aes256-ctr
-  --rsa-bits N                 RSA bits for rsa* profiles
+  --rsa-bits N                 RSA bits for configurable RSA profiles
   --empty-passphrase           pass -N ""
   --use-xdg-output             place default keys under XDG_CONFIG_HOME/ssh
   --fido-algorithm NAME        ecdsa-sk | ed25519-sk, used with --profile hardware
@@ -167,8 +167,7 @@ valid_profiles_csv="$(join_profiles)"
 parse_config_value() {
   local key="$1"
   local raw="$2"
-  local config_path="$3"
-  local line_number="$4"
+  local line_number="$3"
   local first_char=""
   local last_char=""
   local length="${#raw}"
@@ -261,7 +260,7 @@ load_config_file() {
     esac
     seen_keys+="$key"$'\n'
 
-    parsed_value="$(parse_config_value "$key" "$raw_value" "$config_path" "$line_number")"
+    parsed_value="$(parse_config_value "$key" "$raw_value" "$line_number")"
     set_config_value "$field" "$parsed_value"
   done < "$config_path"
 }
@@ -773,7 +772,7 @@ cleanup_temp_artifacts() {
   fi
 }
 
-script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 default_config_path="$script_dir/sss-ssh-keygen.conf"
 config_path="$default_config_path"
 config_path_source="implicit-default"
@@ -827,18 +826,6 @@ apply_config_values
 apply_env_values
 apply_cli_values
 
-rsa_bits_override_source="none"
-if state_is_set "cli" "rsa_bits"; then
-  rsa_bits_override_source="cli"
-elif state_is_set "env" "rsa_bits"; then
-  rsa_bits_override_source="env"
-elif state_is_set "config" "rsa_bits"; then
-  config_rsa_bits_value="$(state_value "config" "rsa_bits")"
-  if [[ "$config_path" != "$script_dir/sss-ssh-keygen.conf" || "$config_rsa_bits_value" != "3072" ]]; then
-    rsa_bits_override_source="config"
-  fi
-fi
-
 require_boolean "$empty_passphrase" "SSH_KEYGEN_EMPTY_PASSPHRASE"
 require_boolean "$quiet" "SSH_KEYGEN_QUIET"
 require_boolean "$dry_run" "SSH_KEYGEN_DRY_RUN"
@@ -883,24 +870,12 @@ rsa3072 | compat)
   key_type="rsa"
   canonical_profile="rsa3072"
   default_output_basename="id_rsa_3072"
-  if [[ "$rsa_bits_override_source" != "none" && "$rsa_bits" != "3072" ]]; then
-    if [[ "$rsa_bits_override_source" == "cli" ]]; then
-      usage_error "--rsa-bits conflicts with the fixed-size $profile profile"
-    fi
-    usage_error "SSH_KEYGEN_RSA_BITS conflicts with the fixed-size $profile profile"
-  fi
   rsa_bits="3072"
   ;;
 rsa4096)
   key_type="rsa"
   canonical_profile="rsa4096"
   default_output_basename="id_rsa_4096"
-  if [[ "$rsa_bits_override_source" != "none" && "$rsa_bits" != "4096" ]]; then
-    if [[ "$rsa_bits_override_source" == "cli" ]]; then
-      usage_error "--rsa-bits conflicts with the fixed-size $profile profile"
-    fi
-    usage_error "SSH_KEYGEN_RSA_BITS conflicts with the fixed-size $profile profile"
-  fi
   rsa_bits="4096"
   ;;
 fips)

@@ -72,8 +72,8 @@ Generate an RSA fallback key:
 | `hardware` | `ed25519-sk -O verify-required` | Modern FIDO-backed key with configurable FIDO algorithm | Defaults to `ed25519-sk`, can be switched to `ecdsa-sk` |
 | `fido-ed25519` | `ed25519-sk -O verify-required` | Fixed Ed25519 FIDO-backed key | Always uses `ed25519-sk` |
 | `fido-ecdsa` | `ecdsa-sk -O verify-required` | Hardware-backed compatibility path | Use for older authenticators or estates without `ed25519-sk` |
-| `rsa3072` / `compat` | `rsa -b 3072` | Conservative compatibility path | Uses RSA with SHA-2 signatures |
-| `rsa4096` | `rsa -b 4096` | Policy-driven larger RSA key | Use only when an explicit standard requires it |
+| `rsa3072` / `compat` | `rsa -b 3072` | Conservative compatibility path | Uses RSA with SHA-2 signatures and forces 3072 bits |
+| `rsa4096` | `rsa -b 4096` | Policy-driven larger RSA key | Use only when an explicit standard requires it; forces 4096 bits |
 | `fips` | `rsa -b 3072` | FIPS-oriented or policy-constrained estate | Provided as an explicit RSA alias |
 
 The shipped defaults are:
@@ -114,6 +114,10 @@ Supported configuration variables include:
 - `SSH_KEYGEN_FIDO_APPLICATION`
 - `SSH_KEYGEN_FIDO_VERIFY_REQUIRED`
 - `SSH_KEYGEN_FIDO_RESIDENT`
+
+For fixed RSA profiles, the profile name wins over `SSH_KEYGEN_RSA_BITS`:
+`rsa3072` always uses 3072 bits and `rsa4096` always uses 4096 bits. Use the
+`fips` profile when you need a configurable RSA bit size.
 
 To use a different config file for a specific run:
 

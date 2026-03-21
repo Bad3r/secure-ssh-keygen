@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 script_path="$repo_root/sss-ssh-keygen.sh"
 
 failures=0
@@ -280,7 +280,7 @@ EOF
   assert_contains "Duplicate config key" "$err" "duplicate config key should be reported"
 }
 
-case_fixed_profile_conflict() {
+case_fixed_profile_overrides_cli_rsa_bits() {
   local tmp out err rc
 
   tmp="$(new_tempdir)"
@@ -289,11 +289,12 @@ case_fixed_profile_conflict() {
 
   "$script_path" --rsa-bits 4096 --profile rsa3072 --dry-run >"$out" 2>"$err"
   rc=$?
-  assert_equals "2" "$rc" "fixed-size rsa conflict should exit 2"
-  assert_contains "conflicts with the fixed-size rsa3072 profile" "$err" "fixed-size rsa conflict should be reported"
+  assert_equals "0" "$rc" "fixed-size rsa profile should override cli rsa bits"
+  assert_contains "profile: rsa3072" "$out" "fixed-size rsa profile should remain selected"
+  assert_contains "-b 3072" "$out" "fixed-size rsa profile should force 3072 bits"
 }
 
-case_env_fixed_profile_conflict() {
+case_env_fixed_profile_overrides_rsa_bits() {
   local tmp out err rc
 
   tmp="$(new_tempdir)"
@@ -302,11 +303,12 @@ case_env_fixed_profile_conflict() {
 
   SSH_KEYGEN_RSA_BITS=4096 "$script_path" --profile rsa3072 --dry-run >"$out" 2>"$err"
   rc=$?
-  assert_equals "2" "$rc" "env rsa override should conflict with fixed profiles"
-  assert_contains "conflicts with the fixed-size rsa3072 profile" "$err" "env rsa conflict should be reported"
+  assert_equals "0" "$rc" "fixed-size rsa profile should override env rsa bits"
+  assert_contains "profile: rsa3072" "$out" "env rsa bits should not change the selected profile"
+  assert_contains "-b 3072" "$out" "env rsa bits should be ignored for fixed-size profiles"
 }
 
-case_config_fixed_profile_conflict() {
+case_config_fixed_profile_overrides_rsa_bits() {
   local tmp cfg out err rc
 
   tmp="$(new_tempdir)"
@@ -321,8 +323,9 @@ EOF
 
   "$script_path" --config "$cfg" --dry-run >"$out" 2>"$err"
   rc=$?
-  assert_equals "2" "$rc" "config rsa override should conflict with fixed profiles"
-  assert_contains "SSH_KEYGEN_RSA_BITS conflicts with the fixed-size rsa3072 profile" "$err" "config rsa conflict should be reported"
+  assert_equals "0" "$rc" "fixed-size rsa profile should override config rsa bits"
+  assert_contains "profile: rsa3072" "$out" "config rsa bits should not change the selected profile"
+  assert_contains "-b 3072" "$out" "config rsa bits should be ignored for fixed-size profiles"
 }
 
 case_default_config_allows_rsa4096() {
@@ -336,6 +339,23 @@ case_default_config_allows_rsa4096() {
   rc=$?
   assert_equals "0" "$rc" "default config should not block rsa4096"
   assert_contains "-b 4096" "$out" "rsa4096 should still force 4096 bits"
+}
+
+case_template_copy_allows_rsa4096() {
+  local tmp cfg out err rc
+
+  tmp="$(new_tempdir)"
+  cfg="$tmp/sss-ssh-keygen.conf"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  sed 's/^SSH_KEYGEN_PROFILE=.*/SSH_KEYGEN_PROFILE=rsa4096/' "$repo_root/sss-ssh-keygen.conf" >"$cfg"
+
+  "$script_path" --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "template-derived config should allow rsa4096"
+  assert_contains "profile: rsa4096" "$out" "template-derived config should select rsa4096"
+  assert_contains "-b 4096" "$out" "template-derived config should still force 4096 bits"
 }
 
 case_fips_stays_configurable() {
@@ -630,10 +650,11 @@ run_case "missing implicit default config warns" case_missing_implicit_default_c
 run_case "config parsing is non-executable" case_config_not_executed
 run_case "config rejects unknown keys" case_config_rejects_unknown_key
 run_case "config rejects duplicates" case_config_rejects_duplicates
-run_case "fixed rsa profile conflicts" case_fixed_profile_conflict
-run_case "env fixed rsa conflicts" case_env_fixed_profile_conflict
-run_case "config fixed rsa conflicts" case_config_fixed_profile_conflict
+run_case "fixed rsa profile overrides cli bits" case_fixed_profile_overrides_cli_rsa_bits
+run_case "env fixed rsa profile overrides bits" case_env_fixed_profile_overrides_rsa_bits
+run_case "config fixed rsa profile overrides bits" case_config_fixed_profile_overrides_rsa_bits
 run_case "default config allows rsa4096" case_default_config_allows_rsa4096
+run_case "template copy allows rsa4096" case_template_copy_allows_rsa4096
 run_case "fips remains configurable" case_fips_stays_configurable
 run_case "env profile override" case_env_profile_override
 run_case "env output override" case_env_output_override
