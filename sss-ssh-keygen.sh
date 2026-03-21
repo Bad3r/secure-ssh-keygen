@@ -150,6 +150,15 @@ trim_ascii_whitespace() {
   printf '%s' "$value"
 }
 
+normalize_path_arg() {
+  local path="$1"
+
+  case "$path" in
+  -*) printf './%s' "$path" ;;
+  *) printf '%s' "$path" ;;
+  esac
+}
+
 set_state_value() {
   local namespace="$1"
   local field="$2"
@@ -509,14 +518,17 @@ require_boolean() {
 stat_mode() {
   local target="$1"
   local mode=""
+  local stat_target=""
 
-  mode="$(stat -c '%a' -- "$target" 2>/dev/null || true)"
+  stat_target="$(normalize_path_arg "$target")"
+
+  mode="$(stat -c '%a' "$stat_target" 2>/dev/null || true)"
   if [[ -n "$mode" ]]; then
     printf '%s' "$mode"
     return 0
   fi
 
-  mode="$(stat -f '%Lp' -- "$target" 2>/dev/null || true)"
+  mode="$(stat -f '%Lp' "$stat_target" 2>/dev/null || true)"
   if [[ -n "$mode" ]]; then
     printf '%s' "$mode"
     return 0
@@ -593,7 +605,7 @@ repair_managed_dir_permissions() {
 
   if [[ "$mode" != "700" ]]; then
     warn "Correcting permissions on $directory to 700"
-    chmod 700 -- "$directory"
+    chmod 700 "$(normalize_path_arg "$directory")"
   fi
 }
 
@@ -781,20 +793,23 @@ derive_effective_keygen_overrides() {
 
 create_temp_output_dir() {
   local output_dir="$1"
-  mktemp -d "$output_dir/.sss-ssh-keygen.XXXXXX"
+  local temp_root=""
+
+  temp_root="$(normalize_path_arg "$output_dir")"
+  mktemp -d "$temp_root/.sss-ssh-keygen.XXXXXX"
 }
 
 cleanup_temp_artifacts() {
   if [[ -n "${temp_output:-}" ]]; then
-    rm -f -- "$temp_output" "${temp_output}.pub"
+    rm -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "${temp_output}.pub")"
   fi
 
   if [[ -n "${temp_dir:-}" ]]; then
-    rmdir -- "$temp_dir" 2>/dev/null || true
+    rmdir "$(normalize_path_arg "$temp_dir")" 2>/dev/null || true
   fi
 }
 
-script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+script_dir="$(CDPATH='' cd -- "$(dirname "$(normalize_path_arg "$0")")" && pwd)"
 default_config_path="$script_dir/sss-ssh-keygen.conf"
 config_path="$default_config_path"
 config_path_source="implicit-default"
@@ -941,7 +956,7 @@ else
 fi
 validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
 output="$effective_output"
-output_dir="$(dirname -- "$output")"
+output_dir="$(dirname "$(normalize_path_arg "$output")")"
 managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
 
 display_cmd=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$output")
@@ -979,7 +994,7 @@ fi
 umask 077
 
 if [[ ! -d "$output_dir" ]]; then
-  mkdir -p -- "$output_dir"
+  mkdir -p "$(normalize_path_arg "$output_dir")"
 fi
 
 repair_managed_dir_permissions "$managed_output_dir"
@@ -1000,7 +1015,7 @@ trap cleanup_temp_artifacts EXIT
 
 if [[ "$force_overwrite" -eq 1 ]]; then
   temp_dir="$(create_temp_output_dir "$output_dir")"
-  temp_output="$temp_dir/$(basename -- "$output")"
+  temp_output="$temp_dir/$(basename "$(normalize_path_arg "$output")")"
   cmd_output="$temp_output"
 fi
 
@@ -1034,9 +1049,9 @@ printf '\n'
 "${cmd[@]}"
 
 if [[ "$force_overwrite" -eq 1 ]]; then
-  mv -f -- "$temp_output" "$output"
-  mv -f -- "${temp_output}.pub" "${output}.pub"
+  mv -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "$output")"
+  mv -f "$(normalize_path_arg "${temp_output}.pub")" "$(normalize_path_arg "${output}.pub")"
   temp_output=""
-  rmdir -- "$temp_dir"
+  rmdir "$(normalize_path_arg "$temp_dir")"
   temp_dir=""
 fi

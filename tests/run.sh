@@ -3,7 +3,13 @@ set -uo pipefail
 
 repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 script_path="$repo_root/sss-ssh-keygen.sh"
-test_bash="${TEST_BASH:-bash}"
+if [[ -n "${TEST_BASH:-}" ]]; then
+  test_bash="$TEST_BASH"
+elif [[ -x /bin/bash ]]; then
+  test_bash="/bin/bash"
+else
+  test_bash="bash"
+fi
 
 failures=0
 test_count=0
@@ -62,6 +68,19 @@ assert_not_contains() {
   if grep -Fq -- "$needle" "$file"; then
     record_failure "$label"
     printf '  unexpected content: %s\n' "$needle" >&2
+    printf '  file contents:\n' >&2
+    sed 's/^/    /' "$file" >&2
+  fi
+}
+
+assert_no_match() {
+  local pattern="$1"
+  local file="$2"
+  local label="$3"
+
+  if grep -Eq "$pattern" "$file"; then
+    record_failure "$label"
+    printf '  unexpected pattern: %s\n' "$pattern" >&2
     printf '  file contents:\n' >&2
     sed 's/^/    /' "$file" >&2
   fi
@@ -155,6 +174,41 @@ EOF
   chmod +x "$bin_dir/ssh" "$bin_dir/ssh-keygen"
 }
 
+write_no_double_dash_shim() {
+  local bin_dir="$1"
+  local command_name="$2"
+  local real_path="$3"
+  local original_path="$4"
+
+  cat >"$bin_dir/$command_name" <<EOF
+#!/bin/sh
+set -eu
+
+for arg in "\$@"; do
+  if [ "\$arg" = "--" ]; then
+    printf 'shim-%s: unsupported --\n' "$command_name" >&2
+    exit 64
+  fi
+done
+
+PATH='$original_path'
+export PATH
+exec "$real_path" "\$@"
+EOF
+
+  chmod +x "$bin_dir/$command_name"
+}
+
+write_bsd_portability_shims() {
+  local bin_dir="$1"
+  local original_path="$PATH"
+
+  write_no_double_dash_shim "$bin_dir" "chmod" "$(command -v chmod)" "$original_path"
+  write_no_double_dash_shim "$bin_dir" "mkdir" "$(command -v mkdir)" "$original_path"
+  write_no_double_dash_shim "$bin_dir" "mv" "$(command -v mv)" "$original_path"
+  write_no_double_dash_shim "$bin_dir" "rmdir" "$(command -v rmdir)" "$original_path"
+}
+
 run_case() {
   local name="$1"
   shift
@@ -166,6 +220,12 @@ run_case() {
 
 case_no_bash4_assoc_arrays() {
   assert_not_contains "declare -A" "$script_path" "wrapper should avoid Bash-4-only associative arrays"
+}
+
+case_no_gnu_only_double_dash_for_path_utils() {
+  assert_no_match '\\b(chmod|mkdir|mv|rmdir|dirname|basename|stat)\\b[^[:cntrl:]]* -- ' \
+    "$script_path" \
+    "wrapper should avoid GNU-only double-dash usage in path utilities"
 }
 
 case_missing_profile_value() {
@@ -473,6 +533,38 @@ case_comment_builder_supports_email() {
   assert_contains "alice@builder\\ -\\ alice@example.com\\ -" "$out" "comment email should appear in the generated comment"
 }
 
+case_filesystem_utils_stay_portable_without_double_dash() {
+  local tmp bin home target custom_target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  custom_target="$tmp/custom/id_portable"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_bsd_portability_shims "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  /bin/chmod 755 "$home/.ssh"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "overwrite path should stay portable without GNU-only -- handling"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "portable overwrite should still replace the private key"
+  assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "portable overwrite should still replace the public key"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_wrapper --output "$custom_target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "custom output path should stay portable without GNU-only -- handling"
+  assert_equals "stub-private" "$(tr -d '\n' <"$custom_target")" "portable mkdir path should create the private key"
+  assert_equals "stub-public" "$(tr -d '\n' <"${custom_target}.pub")" "portable mkdir path should create the public key"
+}
+
 case_fido_version_gates() {
   local tmp bin out err rc
 
@@ -660,6 +752,7 @@ case_explicit_managed_output_repairs_parent_dir() {
 }
 
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
+run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
 run_case "missing config value" case_missing_config_value
 run_case "config equals syntax" case_config_equals
@@ -680,6 +773,7 @@ run_case "empty HOME fails" case_home_empty_fails
 run_case "xdg toggle fallback" case_xdg_toggle_uses_fallback
 run_case "output override beats xdg toggle" case_output_override_beats_xdg_toggle
 run_case "comment builder supports email" case_comment_builder_supports_email
+run_case "filesystem utils stay portable without double dash" case_filesystem_utils_stay_portable_without_double_dash
 run_case "fido version gates" case_fido_version_gates
 run_case "overwrite preserves existing keys" case_force_overwrite_preserves_existing_keys
 run_case "overwrite replaces after success" case_force_overwrite_replaces_after_success
