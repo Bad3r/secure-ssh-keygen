@@ -13,10 +13,26 @@ declare -ar VALID_PROFILES=(
   fips
 )
 
-declare -A cli_values=()
-declare -A cli_set=()
-declare -A config_values=()
-declare -A config_set=()
+declare -ar MERGE_FIELDS=(
+  profile
+  output
+  comment
+  comment_user
+  comment_host
+  comment_email
+  rounds
+  cipher
+  rsa_bits
+  empty_passphrase
+  quiet
+  dry_run
+  force_overwrite
+  use_xdg_output
+  fido_algorithm
+  fido_application
+  fido_verify_required
+  fido_resident
+)
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -113,14 +129,37 @@ trim_ascii_whitespace() {
   printf '%s' "$value"
 }
 
+set_state_value() {
+  local namespace="$1"
+  local field="$2"
+  local value="$3"
+
+  printf -v "${namespace}_value_${field}" '%s' "$value"
+  printf -v "${namespace}_set_${field}" '1'
+}
+
+state_is_set() {
+  local namespace="$1"
+  local field="$2"
+  local var_name="${namespace}_set_${field}"
+
+  [[ "${!var_name:-0}" == "1" ]]
+}
+
+state_value() {
+  local namespace="$1"
+  local field="$2"
+  local var_name="${namespace}_value_${field}"
+
+  printf '%s' "${!var_name:-}"
+}
+
 set_cli_value() {
-  cli_values["$1"]="$2"
-  cli_set["$1"]=1
+  set_state_value "cli" "$1" "$2"
 }
 
 set_config_value() {
-  config_values["$1"]="$2"
-  config_set["$1"]=1
+  set_state_value "config" "$1" "$2"
 }
 
 valid_profiles_csv="$(join_profiles)"
@@ -193,7 +232,7 @@ load_config_file() {
   local parsed_value=""
   local field=""
   local line_number=0
-  declare -A seen_keys=()
+  local seen_keys=$'\n'
 
   [[ -e "$config_path" ]] || die "Config file not found: $config_path"
   [[ -r "$config_path" ]] || die "Config file is not readable: $config_path"
@@ -215,9 +254,12 @@ load_config_file() {
     field="$(config_field_for_key "$key")" ||
       die "Unsupported config key $key in $config_path:$line_number"
 
-    [[ -z "${seen_keys[$key]:-}" ]] ||
+    case "$seen_keys" in
+    *$'\n'"$key"$'\n'*)
       die "Duplicate config key $key in $config_path:$line_number"
-    seen_keys["$key"]=1
+      ;;
+    esac
+    seen_keys+="$key"$'\n'
 
     parsed_value="$(parse_config_value "$key" "$raw_value" "$config_path" "$line_number")"
     set_config_value "$field" "$parsed_value"
@@ -375,46 +417,60 @@ parse_cli() {
   done
 }
 
-apply_config_values() {
-  [[ "${config_set[profile]:-0}" == 1 ]] && profile="${config_values[profile]}"
-  [[ "${config_set[output]:-0}" == 1 ]] && output="${config_values[output]}"
-  [[ "${config_set[comment]:-0}" == 1 ]] && comment="${config_values[comment]}"
-  [[ "${config_set[comment_user]:-0}" == 1 ]] && comment_user="${config_values[comment_user]}"
-  [[ "${config_set[comment_host]:-0}" == 1 ]] && comment_host="${config_values[comment_host]}"
-  [[ "${config_set[comment_email]:-0}" == 1 ]] && comment_email="${config_values[comment_email]}"
-  [[ "${config_set[rounds]:-0}" == 1 ]] && rounds="${config_values[rounds]}"
-  [[ "${config_set[cipher]:-0}" == 1 ]] && cipher="${config_values[cipher]}"
-  [[ "${config_set[rsa_bits]:-0}" == 1 ]] && rsa_bits="${config_values[rsa_bits]}"
-  [[ "${config_set[empty_passphrase]:-0}" == 1 ]] && empty_passphrase="${config_values[empty_passphrase]}"
-  [[ "${config_set[quiet]:-0}" == 1 ]] && quiet="${config_values[quiet]}"
-  [[ "${config_set[dry_run]:-0}" == 1 ]] && dry_run="${config_values[dry_run]}"
-  [[ "${config_set[use_xdg_output]:-0}" == 1 ]] && use_xdg_output="${config_values[use_xdg_output]}"
-  [[ "${config_set[fido_algorithm]:-0}" == 1 ]] && fido_algorithm="${config_values[fido_algorithm]}"
-  [[ "${config_set[fido_application]:-0}" == 1 ]] && fido_application="${config_values[fido_application]}"
-  [[ "${config_set[fido_verify_required]:-0}" == 1 ]] && fido_verify_required="${config_values[fido_verify_required]}"
-  [[ "${config_set[fido_resident]:-0}" == 1 ]] && fido_resident="${config_values[fido_resident]}"
+apply_state_values() {
+  local namespace="$1"
+  local field=""
+  local value=""
+
+  for field in "${MERGE_FIELDS[@]}"; do
+    if state_is_set "$namespace" "$field"; then
+      value="$(state_value "$namespace" "$field")"
+      printf -v "$field" '%s' "$value"
+    fi
+  done
+
   return 0
 }
 
+apply_config_values() {
+  apply_state_values "config"
+}
+
+capture_env_value() {
+  local env_name="$1"
+  local field="$2"
+
+  if [[ "${!env_name+x}" == x ]]; then
+    set_state_value "env" "$field" "${!env_name}"
+  fi
+}
+
+capture_env_values() {
+  capture_env_value "SSH_KEYGEN_PROFILE" "profile"
+  capture_env_value "SSH_KEYGEN_OUTPUT" "output"
+  capture_env_value "SSH_KEYGEN_COMMENT" "comment"
+  capture_env_value "SSH_KEYGEN_COMMENT_USER" "comment_user"
+  capture_env_value "SSH_KEYGEN_COMMENT_HOST" "comment_host"
+  capture_env_value "SSH_KEYGEN_COMMENT_EMAIL" "comment_email"
+  capture_env_value "SSH_KEYGEN_KDF_ROUNDS" "rounds"
+  capture_env_value "SSH_KEYGEN_CIPHER" "cipher"
+  capture_env_value "SSH_KEYGEN_RSA_BITS" "rsa_bits"
+  capture_env_value "SSH_KEYGEN_EMPTY_PASSPHRASE" "empty_passphrase"
+  capture_env_value "SSH_KEYGEN_QUIET" "quiet"
+  capture_env_value "SSH_KEYGEN_DRY_RUN" "dry_run"
+  capture_env_value "SSH_KEYGEN_USE_XDG_OUTPUT" "use_xdg_output"
+  capture_env_value "SSH_KEYGEN_FIDO_ALGORITHM" "fido_algorithm"
+  capture_env_value "SSH_KEYGEN_FIDO_APPLICATION" "fido_application"
+  capture_env_value "SSH_KEYGEN_FIDO_VERIFY_REQUIRED" "fido_verify_required"
+  capture_env_value "SSH_KEYGEN_FIDO_RESIDENT" "fido_resident"
+}
+
+apply_env_values() {
+  apply_state_values "env"
+}
+
 apply_cli_values() {
-  [[ "${cli_set[profile]:-0}" == 1 ]] && profile="${cli_values[profile]}"
-  [[ "${cli_set[output]:-0}" == 1 ]] && output="${cli_values[output]}"
-  [[ "${cli_set[comment]:-0}" == 1 ]] && comment="${cli_values[comment]}"
-  [[ "${cli_set[comment_user]:-0}" == 1 ]] && comment_user="${cli_values[comment_user]}"
-  [[ "${cli_set[comment_host]:-0}" == 1 ]] && comment_host="${cli_values[comment_host]}"
-  [[ "${cli_set[comment_email]:-0}" == 1 ]] && comment_email="${cli_values[comment_email]}"
-  [[ "${cli_set[rounds]:-0}" == 1 ]] && rounds="${cli_values[rounds]}"
-  [[ "${cli_set[cipher]:-0}" == 1 ]] && cipher="${cli_values[cipher]}"
-  [[ "${cli_set[rsa_bits]:-0}" == 1 ]] && rsa_bits="${cli_values[rsa_bits]}"
-  [[ "${cli_set[empty_passphrase]:-0}" == 1 ]] && empty_passphrase="${cli_values[empty_passphrase]}"
-  [[ "${cli_set[quiet]:-0}" == 1 ]] && quiet="${cli_values[quiet]}"
-  [[ "${cli_set[dry_run]:-0}" == 1 ]] && dry_run="${cli_values[dry_run]}"
-  [[ "${cli_set[use_xdg_output]:-0}" == 1 ]] && use_xdg_output="${cli_values[use_xdg_output]}"
-  [[ "${cli_set[fido_algorithm]:-0}" == 1 ]] && fido_algorithm="${cli_values[fido_algorithm]}"
-  [[ "${cli_set[fido_application]:-0}" == 1 ]] && fido_application="${cli_values[fido_application]}"
-  [[ "${cli_set[fido_verify_required]:-0}" == 1 ]] && fido_verify_required="${cli_values[fido_verify_required]}"
-  [[ "${cli_set[fido_resident]:-0}" == 1 ]] && fido_resident="${cli_values[fido_resident]}"
-  [[ "${cli_set[force_overwrite]:-0}" == 1 ]] && force_overwrite="${cli_values[force_overwrite]}"
+  apply_state_values "cli"
   return 0
 }
 
@@ -467,6 +523,43 @@ resolve_default_output_dir() {
     die "HOME must be set unless --output or SSH_KEYGEN_OUTPUT specifies a path"
 
   printf '%s/.ssh' "$HOME"
+}
+
+resolve_optional_xdg_output_dir() {
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    printf '%s/ssh' "$XDG_CONFIG_HOME"
+    return 0
+  fi
+
+  if [[ -n "${HOME:-}" ]]; then
+    printf '%s/.config/ssh' "$HOME"
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_managed_ssh_root_for_output_dir() {
+  local target_dir="$1"
+  local candidate=""
+
+  if [[ -n "${HOME:-}" ]]; then
+    candidate="$HOME/.ssh"
+    if [[ "$target_dir" == "$candidate" || "$target_dir" == "$candidate/"* ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+
+  candidate="$(resolve_optional_xdg_output_dir 2>/dev/null || true)"
+  if [[ -n "$candidate" ]]; then
+    if [[ "$target_dir" == "$candidate" || "$target_dir" == "$candidate/"* ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 repair_managed_dir_permissions() {
@@ -572,10 +665,12 @@ validate_fido_version_requirements() {
   local minimum_major=8
   local minimum_minor=2
   local minimum_label="8.2"
+  local effective_key_type="$1"
+  local effective_verify_required="$2"
 
-  [[ "$key_type" == *"-sk" ]] || return 0
+  [[ "$effective_key_type" == *"-sk" ]] || return 0
 
-  if [[ "$fido_verify_required" -eq 1 ]]; then
+  if [[ "$effective_verify_required" -eq 1 ]]; then
     minimum_minor=4
     minimum_label="8.4"
   fi
@@ -586,6 +681,55 @@ validate_fido_version_requirements() {
 
   if ! version_at_least "$have_major" "$have_minor" "$minimum_major" "$minimum_minor"; then
     die "OpenSSH $minimum_label or newer is required for the selected FIDO options"
+  fi
+}
+
+derive_effective_keygen_overrides() {
+  effective_key_type="$key_type"
+  if [[ "$key_type" == *"-sk" && "$fido_verify_required" -eq 1 ]]; then
+    effective_verify_required=1
+  else
+    effective_verify_required=0
+  fi
+
+  while (($#)); do
+    case "$1" in
+    -t)
+      (($# >= 2)) || break
+      effective_key_type="$2"
+      if [[ "$effective_key_type" != *"-sk" ]]; then
+        effective_verify_required=0
+      fi
+      shift 2
+      ;;
+    -t*)
+      effective_key_type="${1#-t}"
+      if [[ "$effective_key_type" != *"-sk" ]]; then
+        effective_verify_required=0
+      fi
+      shift
+      ;;
+    -O)
+      (($# >= 2)) || break
+      if [[ "$2" == "verify-required" ]]; then
+        effective_verify_required=1
+      fi
+      shift 2
+      ;;
+    -O*)
+      if [[ "${1#-O}" == "verify-required" ]]; then
+        effective_verify_required=1
+      fi
+      shift
+      ;;
+    *)
+      shift
+      ;;
+    esac
+  done
+
+  if [[ "$effective_key_type" != *"-sk" ]]; then
+    effective_verify_required=0
   fi
 }
 
@@ -609,8 +753,12 @@ config_path="${SSS_SSH_KEYGEN_CONFIG:-${SSH_KEYGEN_SECURE_CONFIG:-$script_dir/ss
 extra_ssh_keygen_args=()
 
 parse_cli "$@"
-[[ "${cli_set[config_path]:-0}" == 1 ]] && config_path="${cli_values[config_path]}"
+if state_is_set "cli" "config_path"; then
+  config_path="$(state_value "cli" "config_path")"
+fi
 load_config_file "$config_path"
+
+capture_env_values
 
 profile="ed25519"
 rounds="100"
@@ -632,11 +780,19 @@ fido_resident="0"
 fido_application="ssh:"
 
 apply_config_values
+apply_env_values
 apply_cli_values
 
-config_rsa_bits_is_override=0
-if [[ "${config_set[rsa_bits]:-0}" == 1 && "${config_values[rsa_bits]}" != "" && "${config_values[rsa_bits]}" != "3072" ]]; then
-  config_rsa_bits_is_override=1
+rsa_bits_override_source="none"
+if state_is_set "cli" "rsa_bits"; then
+  rsa_bits_override_source="cli"
+elif state_is_set "env" "rsa_bits"; then
+  rsa_bits_override_source="env"
+elif state_is_set "config" "rsa_bits"; then
+  config_rsa_bits_value="$(state_value "config" "rsa_bits")"
+  if [[ "$config_path" != "$script_dir/sss-ssh-keygen.conf" || "$config_rsa_bits_value" != "3072" ]]; then
+    rsa_bits_override_source="config"
+  fi
 fi
 
 require_boolean "$empty_passphrase" "SSH_KEYGEN_EMPTY_PASSPHRASE"
@@ -683,10 +839,10 @@ rsa3072 | compat)
   key_type="rsa"
   canonical_profile="rsa3072"
   default_output_basename="id_rsa_3072"
-  if [[ "${cli_set[rsa_bits]:-0}" == 1 && "${cli_values[rsa_bits]}" != "3072" ]]; then
-    usage_error "--rsa-bits conflicts with the fixed-size $profile profile"
-  fi
-  if [[ "$config_rsa_bits_is_override" -eq 1 && "${config_values[rsa_bits]}" != "3072" ]]; then
+  if [[ "$rsa_bits_override_source" != "none" && "$rsa_bits" != "3072" ]]; then
+    if [[ "$rsa_bits_override_source" == "cli" ]]; then
+      usage_error "--rsa-bits conflicts with the fixed-size $profile profile"
+    fi
     usage_error "SSH_KEYGEN_RSA_BITS conflicts with the fixed-size $profile profile"
   fi
   rsa_bits="3072"
@@ -695,10 +851,10 @@ rsa4096)
   key_type="rsa"
   canonical_profile="rsa4096"
   default_output_basename="id_rsa_4096"
-  if [[ "${cli_set[rsa_bits]:-0}" == 1 && "${cli_values[rsa_bits]}" != "4096" ]]; then
-    usage_error "--rsa-bits conflicts with the fixed-size $profile profile"
-  fi
-  if [[ "$config_rsa_bits_is_override" -eq 1 && "${config_values[rsa_bits]}" != "4096" ]]; then
+  if [[ "$rsa_bits_override_source" != "none" && "$rsa_bits" != "4096" ]]; then
+    if [[ "$rsa_bits_override_source" == "cli" ]]; then
+      usage_error "--rsa-bits conflicts with the fixed-size $profile profile"
+    fi
     usage_error "SSH_KEYGEN_RSA_BITS conflicts with the fixed-size $profile profile"
   fi
   rsa_bits="4096"
@@ -729,17 +885,19 @@ esac
 if [[ -z "$output" ]]; then
   managed_output_dir="$(resolve_default_output_dir)"
   output="$managed_output_dir/$default_output_basename"
-else
-  managed_output_dir=""
 fi
 
 output_dir="$(dirname -- "$output")"
+if [[ -z "${managed_output_dir:-}" ]]; then
+  managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
+fi
 
 if [[ -z "$comment" ]]; then
   comment="$(build_default_comment)"
 fi
 
-validate_fido_version_requirements
+derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
+validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
 
 display_cmd=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$output")
 if [[ "$key_type" == "rsa" ]]; then

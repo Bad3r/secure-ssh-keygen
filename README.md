@@ -14,7 +14,8 @@ defaults, then manage transport policy and token lifecycle separately.
 
 ## Requirements and compatibility
 
-- Bash is required; the wrapper is implemented as a Bash script.
+- Bash is required; the wrapper is implemented as a Bash script and remains
+  compatible with Bash 3.2 for stock macOS `/bin/bash`.
 - OpenSSH is required. FIDO-backed SSH keys require OpenSSH 8.2 or newer.
 - The default `verify-required` hardware mode requires OpenSSH 8.4 or newer.
 - The `hardware` profile uses a configurable FIDO algorithm and defaults to
@@ -89,6 +90,10 @@ The wrapper loads `sss-ssh-keygen.conf` from the repository root by default.
 Use `--config PATH` or `--config=PATH` to load an alternate file. Config files
 are assignment-only: use plain `KEY=VALUE` lines, optionally quoted, and avoid
 shell syntax or commands.
+
+Exported `SSH_KEYGEN_*` variables remain supported for one-off overrides. The
+effective precedence is: built-in defaults, then config-file values, then
+exported environment overrides, then explicit CLI flags.
 
 Supported configuration variables include:
 

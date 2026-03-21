@@ -37,6 +37,19 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local needle="$1"
+  local file="$2"
+  local label="$3"
+
+  if grep -Fq -- "$needle" "$file"; then
+    record_failure "$label"
+    printf '  unexpected content: %s\n' "$needle" >&2
+    printf '  file contents:\n' >&2
+    sed 's/^/    /' "$file" >&2
+  fi
+}
+
 assert_not_exists() {
   local path="$1"
   local label="$2"
@@ -131,6 +144,10 @@ run_case() {
   test_count=$((test_count + 1))
   printf 'ok: %s\n' "$name"
   "$@"
+}
+
+case_no_bash4_assoc_arrays() {
+  assert_not_contains "declare -A" "$script_path" "wrapper should avoid Bash-4-only associative arrays"
 }
 
 case_missing_profile_value() {
@@ -257,6 +274,19 @@ case_fixed_profile_conflict() {
   assert_contains "conflicts with the fixed-size rsa3072 profile" "$err" "fixed-size rsa conflict should be reported"
 }
 
+case_env_fixed_profile_conflict() {
+  local tmp out err rc
+
+  tmp="$(new_tempdir)"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  SSH_KEYGEN_RSA_BITS=4096 "$script_path" --profile rsa3072 --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "env rsa override should conflict with fixed profiles"
+  assert_contains "conflicts with the fixed-size rsa3072 profile" "$err" "env rsa conflict should be reported"
+}
+
 case_config_fixed_profile_conflict() {
   local tmp cfg out err rc
 
@@ -300,6 +330,33 @@ case_fips_stays_configurable() {
   rc=$?
   assert_equals "0" "$rc" "fips should remain configurable"
   assert_contains "-b 4096" "$out" "fips should honor explicit rsa bits"
+}
+
+case_env_profile_override() {
+  local tmp out err rc
+
+  tmp="$(new_tempdir)"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  SSH_KEYGEN_PROFILE=rsa4096 "$script_path" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "exported profile override should still work"
+  assert_contains "profile: rsa4096" "$out" "exported profile override should change the selected profile"
+}
+
+case_env_output_override() {
+  local tmp target out err rc
+
+  tmp="$(new_tempdir)"
+  target="$tmp/custom/id_ed25519"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="" SSH_KEYGEN_OUTPUT="$target" "$script_path" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "exported output override should bypass HOME-based default resolution"
+  assert_contains "output: $target" "$out" "exported output override should be reflected in dry-run output"
 }
 
 case_home_empty_fails() {
@@ -385,6 +442,11 @@ case_fido_version_gates() {
     "$script_path" --profile hardware --no-fido-verify-required --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "FIDO without verify-required should work on OpenSSH 8.3"
+
+  PATH="$bin:$PATH" SSS_TEST_SSH_VERSION="OpenSSH_8.1p1, OpenSSL test" \
+    "$script_path" --profile hardware --dry-run -- -t ed25519 >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "non-FIDO passthrough override should skip the FIDO version gate"
 }
 
 case_force_overwrite_preserves_existing_keys() {
@@ -452,6 +514,29 @@ case_managed_dir_permissions_warn_and_fix() {
   assert_equals "700" "$mode" "managed dir should be repaired to 700"
 }
 
+case_explicit_managed_output_repairs_parent_dir() {
+  local tmp bin home target out err rc mode
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/work_key"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  chmod 755 "$home/.ssh"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    "$script_path" --output "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "explicit outputs under ~/.ssh should still succeed"
+  assert_contains "Correcting permissions on $home/.ssh to 700" "$err" "explicit managed outputs should still repair ~/.ssh"
+  mode="$(stat -c '%a' "$home/.ssh" 2>/dev/null || stat -f '%Lp' "$home/.ssh")"
+  assert_equals "700" "$mode" "explicit managed outputs should still repair ~/.ssh to 700"
+}
+
+run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "missing profile value" case_missing_profile_value
 run_case "missing config value" case_missing_config_value
 run_case "config equals syntax" case_config_equals
@@ -460,9 +545,12 @@ run_case "config parsing is non-executable" case_config_not_executed
 run_case "config rejects unknown keys" case_config_rejects_unknown_key
 run_case "config rejects duplicates" case_config_rejects_duplicates
 run_case "fixed rsa profile conflicts" case_fixed_profile_conflict
+run_case "env fixed rsa conflicts" case_env_fixed_profile_conflict
 run_case "config fixed rsa conflicts" case_config_fixed_profile_conflict
 run_case "default config allows rsa4096" case_default_config_allows_rsa4096
 run_case "fips remains configurable" case_fips_stays_configurable
+run_case "env profile override" case_env_profile_override
+run_case "env output override" case_env_output_override
 run_case "empty HOME fails" case_home_empty_fails
 run_case "xdg toggle fallback" case_xdg_toggle_uses_fallback
 run_case "output override beats xdg toggle" case_output_override_beats_xdg_toggle
@@ -471,6 +559,7 @@ run_case "fido version gates" case_fido_version_gates
 run_case "overwrite preserves existing keys" case_force_overwrite_preserves_existing_keys
 run_case "overwrite replaces after success" case_force_overwrite_replaces_after_success
 run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_fix
+run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests\n' "$failures" "$test_count" >&2
