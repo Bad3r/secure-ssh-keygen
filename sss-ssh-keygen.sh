@@ -121,6 +121,27 @@ Config:
 EOF
 }
 
+set_extra_ssh_keygen_args() {
+  if (($#)); then
+    extra_ssh_keygen_args=("$@")
+    extra_ssh_keygen_args_present=1
+    return 0
+  fi
+
+  extra_ssh_keygen_args=()
+  extra_ssh_keygen_args_present=0
+}
+
+append_forwarded_ssh_keygen_args() {
+  local arg=""
+
+  for arg in "$@"; do
+    forwarded_ssh_keygen_args+=("$arg")
+  done
+
+  forwarded_ssh_keygen_args_present=1
+}
+
 trim_ascii_whitespace() {
   local value="$1"
 
@@ -406,7 +427,7 @@ parse_cli() {
       ;;
     --)
       shift
-      extra_ssh_keygen_args=("$@")
+      set_extra_ssh_keygen_args "$@"
       break
       ;;
     *)
@@ -692,12 +713,13 @@ derive_effective_keygen_overrides() {
   fi
   effective_output="$output"
   forwarded_ssh_keygen_args=()
+  forwarded_ssh_keygen_args_present=0
 
   while (($#)); do
     case "$1" in
     -f)
       if (($# < 2)); then
-        forwarded_ssh_keygen_args+=("$1")
+        append_forwarded_ssh_keygen_args "$1"
         break
       fi
       effective_output="$2"
@@ -709,10 +731,10 @@ derive_effective_keygen_overrides() {
       ;;
     -t)
       if (($# < 2)); then
-        forwarded_ssh_keygen_args+=("$1")
+        append_forwarded_ssh_keygen_args "$1"
         break
       fi
-      forwarded_ssh_keygen_args+=("$1" "$2")
+      append_forwarded_ssh_keygen_args "$1" "$2"
       effective_key_type="$2"
       if [[ "$effective_key_type" != *"-sk" ]]; then
         effective_verify_required=0
@@ -720,7 +742,7 @@ derive_effective_keygen_overrides() {
       shift 2
       ;;
     -t*)
-      forwarded_ssh_keygen_args+=("$1")
+      append_forwarded_ssh_keygen_args "$1"
       effective_key_type="${1#-t}"
       if [[ "$effective_key_type" != *"-sk" ]]; then
         effective_verify_required=0
@@ -729,24 +751,24 @@ derive_effective_keygen_overrides() {
       ;;
     -O)
       if (($# < 2)); then
-        forwarded_ssh_keygen_args+=("$1")
+        append_forwarded_ssh_keygen_args "$1"
         break
       fi
-      forwarded_ssh_keygen_args+=("$1" "$2")
+      append_forwarded_ssh_keygen_args "$1" "$2"
       if [[ "$2" == "verify-required" ]]; then
         effective_verify_required=1
       fi
       shift 2
       ;;
     -O*)
-      forwarded_ssh_keygen_args+=("$1")
+      append_forwarded_ssh_keygen_args "$1"
       if [[ "${1#-O}" == "verify-required" ]]; then
         effective_verify_required=1
       fi
       shift
       ;;
     *)
-      forwarded_ssh_keygen_args+=("$1")
+      append_forwarded_ssh_keygen_args "$1"
       shift
       ;;
     esac
@@ -785,7 +807,9 @@ if [[ -n "${SSS_SSH_KEYGEN_CONFIG:-}" ]]; then
   config_path_source="env"
 fi
 extra_ssh_keygen_args=()
+extra_ssh_keygen_args_present=0
 forwarded_ssh_keygen_args=()
+forwarded_ssh_keygen_args_present=0
 
 parse_cli "$@"
 if state_is_set "cli" "config_path"; then
@@ -910,7 +934,11 @@ if [[ -z "$comment" ]]; then
   comment="$(build_default_comment)"
 fi
 
-derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
+if [[ "$extra_ssh_keygen_args_present" -eq 1 ]]; then
+  derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
+else
+  derive_effective_keygen_overrides
+fi
 validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
 output="$effective_output"
 output_dir="$(dirname -- "$output")"
@@ -935,7 +963,7 @@ if [[ "$key_type" == *"-sk" ]]; then
     display_cmd+=(-O resident)
   fi
 fi
-if ((${#forwarded_ssh_keygen_args[@]})); then
+if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
   display_cmd+=("${forwarded_ssh_keygen_args[@]}")
 fi
 
@@ -995,7 +1023,7 @@ if [[ "$key_type" == *"-sk" ]]; then
     cmd+=(-O resident)
   fi
 fi
-if ((${#forwarded_ssh_keygen_args[@]})); then
+if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
   cmd+=("${forwarded_ssh_keygen_args[@]}")
 fi
 

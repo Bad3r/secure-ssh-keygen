@@ -3,14 +3,20 @@ set -uo pipefail
 
 repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 script_path="$repo_root/sss-ssh-keygen.sh"
+test_bash="${TEST_BASH:-bash}"
 
 failures=0
 test_count=0
 
 cleanup_paths=()
+cleanup_paths_present=0
 
 cleanup() {
   local path=""
+
+  if [[ "$cleanup_paths_present" -ne 1 ]]; then
+    return 0
+  fi
 
   for path in "${cleanup_paths[@]}"; do
     rm -rf -- "$path"
@@ -22,6 +28,17 @@ trap cleanup EXIT
 record_failure() {
   printf 'FAIL: %s\n' "$1" >&2
   failures=$((failures + 1))
+}
+
+run_script() {
+  local target="$1"
+  shift
+
+  "$test_bash" "$target" "$@"
+}
+
+run_wrapper() {
+  run_script "$script_path" "$@"
 }
 
 assert_contains() {
@@ -76,6 +93,7 @@ new_tempdir() {
   local dir
   dir="$(mktemp -d)"
   cleanup_paths+=("$dir")
+  cleanup_paths_present=1
   printf '%s' "$dir"
 }
 
@@ -157,7 +175,7 @@ case_missing_profile_value() {
   out="$tmp/out"
   err="$tmp/err"
 
-  "$script_path" --profile >"$out" 2>"$err"
+  run_wrapper --profile >"$out" 2>"$err"
   rc=$?
   assert_equals "2" "$rc" "missing profile should exit 2"
   assert_contains "--profile requires a value" "$err" "missing profile should report usage error"
@@ -170,7 +188,7 @@ case_missing_config_value() {
   out="$tmp/out"
   err="$tmp/err"
 
-  "$script_path" --config >"$out" 2>"$err"
+  run_wrapper --config >"$out" 2>"$err"
   rc=$?
   assert_equals "2" "$rc" "missing config value should exit 2"
   assert_contains "--config requires a path" "$err" "missing config value should report usage error"
@@ -183,7 +201,7 @@ case_config_equals() {
   out="$tmp/out"
   err="$tmp/err"
 
-  "$script_path" --config="$repo_root/sss-ssh-keygen.conf" --dry-run >"$out" 2>"$err"
+  run_wrapper --config="$repo_root/sss-ssh-keygen.conf" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "config= should succeed"
   assert_contains "profile: ed25519" "$out" "config= should still load defaults"
@@ -196,7 +214,7 @@ case_missing_config() {
   out="$tmp/out"
   err="$tmp/err"
 
-  "$script_path" --config "$tmp/missing.conf" --dry-run >"$out" 2>"$err"
+  run_wrapper --config "$tmp/missing.conf" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "missing config should exit 1"
   assert_contains "Config file not found" "$err" "missing config should fail loudly"
@@ -213,7 +231,7 @@ case_missing_implicit_default_config_warns() {
   cp "$script_path" "$script_copy"
   chmod +x "$script_copy"
 
-  HOME="$tmp/home" USER="alice" HOSTNAME="host" "$script_copy" --dry-run >"$out" 2>"$err"
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$script_copy" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "missing implicit default config should fall back to built-in defaults"
   assert_contains "warning: Default config file not found: $tmp/sss-ssh-keygen.conf; continuing with built-in defaults" "$err" "missing implicit default config should warn"
@@ -235,7 +253,7 @@ SSH_KEYGEN_PROFILE=ed25519
 SSH_KEYGEN_COMMENT="\$(touch \"$marker\")"
 EOF
 
-  "$script_path" --config "$cfg" --dry-run >"$out" 2>"$err"
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "literal config values should parse"
   assert_not_exists "$marker" "config parsing must not execute command substitutions"
@@ -255,7 +273,7 @@ SSH_KEYGEN_PROFILE=ed25519
 SSH_KEYGEN_UNKNOWN=1
 EOF
 
-  "$script_path" --config "$cfg" --dry-run >"$out" 2>"$err"
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "unknown config keys should fail"
   assert_contains "Unsupported config key" "$err" "unknown config key should be reported"
@@ -274,7 +292,7 @@ SSH_KEYGEN_PROFILE=ed25519
 SSH_KEYGEN_PROFILE=hardware
 EOF
 
-  "$script_path" --config "$cfg" --dry-run >"$out" 2>"$err"
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "duplicate config keys should fail"
   assert_contains "Duplicate config key" "$err" "duplicate config key should be reported"
@@ -287,7 +305,7 @@ case_fixed_profile_overrides_cli_rsa_bits() {
   out="$tmp/out"
   err="$tmp/err"
 
-  "$script_path" --rsa-bits 4096 --profile rsa3072 --dry-run >"$out" 2>"$err"
+  run_wrapper --rsa-bits 4096 --profile rsa3072 --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "fixed-size rsa profile should override cli rsa bits"
   assert_contains "profile: rsa3072" "$out" "fixed-size rsa profile should remain selected"
@@ -301,7 +319,7 @@ case_env_fixed_profile_overrides_rsa_bits() {
   out="$tmp/out"
   err="$tmp/err"
 
-  SSH_KEYGEN_RSA_BITS=4096 "$script_path" --profile rsa3072 --dry-run >"$out" 2>"$err"
+  SSH_KEYGEN_RSA_BITS=4096 run_wrapper --profile rsa3072 --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "fixed-size rsa profile should override env rsa bits"
   assert_contains "profile: rsa3072" "$out" "env rsa bits should not change the selected profile"
@@ -321,7 +339,7 @@ SSH_KEYGEN_PROFILE=rsa3072
 SSH_KEYGEN_RSA_BITS=4096
 EOF
 
-  "$script_path" --config "$cfg" --dry-run >"$out" 2>"$err"
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "fixed-size rsa profile should override config rsa bits"
   assert_contains "profile: rsa3072" "$out" "config rsa bits should not change the selected profile"
@@ -335,7 +353,7 @@ case_default_config_allows_rsa4096() {
   out="$tmp/out"
   err="$tmp/err"
 
-  "$script_path" --profile rsa4096 --dry-run >"$out" 2>"$err"
+  run_wrapper --profile rsa4096 --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "default config should not block rsa4096"
   assert_contains "-b 4096" "$out" "rsa4096 should still force 4096 bits"
@@ -351,7 +369,7 @@ case_template_copy_allows_rsa4096() {
 
   sed 's/^SSH_KEYGEN_PROFILE=.*/SSH_KEYGEN_PROFILE=rsa4096/' "$repo_root/sss-ssh-keygen.conf" >"$cfg"
 
-  "$script_path" --config "$cfg" --dry-run >"$out" 2>"$err"
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "template-derived config should allow rsa4096"
   assert_contains "profile: rsa4096" "$out" "template-derived config should select rsa4096"
@@ -365,7 +383,7 @@ case_fips_stays_configurable() {
   out="$tmp/out"
   err="$tmp/err"
 
-  "$script_path" --profile fips --rsa-bits 4096 --dry-run >"$out" 2>"$err"
+  run_wrapper --profile fips --rsa-bits 4096 --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "fips should remain configurable"
   assert_contains "-b 4096" "$out" "fips should honor explicit rsa bits"
@@ -378,7 +396,7 @@ case_env_profile_override() {
   out="$tmp/out"
   err="$tmp/err"
 
-  SSH_KEYGEN_PROFILE=rsa4096 "$script_path" --dry-run >"$out" 2>"$err"
+  SSH_KEYGEN_PROFILE=rsa4096 run_wrapper --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "exported profile override should still work"
   assert_contains "profile: rsa4096" "$out" "exported profile override should change the selected profile"
@@ -392,7 +410,7 @@ case_env_output_override() {
   out="$tmp/out"
   err="$tmp/err"
 
-  HOME="" SSH_KEYGEN_OUTPUT="$target" "$script_path" --dry-run >"$out" 2>"$err"
+  HOME="" SSH_KEYGEN_OUTPUT="$target" run_wrapper --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "exported output override should bypass HOME-based default resolution"
   assert_contains "output: $target" "$out" "exported output override should be reflected in dry-run output"
@@ -405,7 +423,7 @@ case_home_empty_fails() {
   out="$tmp/out"
   err="$tmp/err"
 
-  HOME="" "$script_path" --dry-run >"$out" 2>"$err"
+  HOME="" run_wrapper --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "empty HOME should fail when using home defaults"
   assert_contains "HOME must be set" "$err" "empty HOME should produce a clear error"
@@ -420,7 +438,7 @@ case_xdg_toggle_uses_fallback() {
   out="$tmp/out"
   err="$tmp/err"
 
-  HOME="$home" XDG_CONFIG_HOME="" "$script_path" --use-xdg-output --dry-run >"$out" 2>"$err"
+  HOME="$home" XDG_CONFIG_HOME="" run_wrapper --use-xdg-output --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "xdg toggle should succeed with HOME fallback"
   assert_contains "$home/.config/ssh/id_ed25519" "$out" "xdg toggle should fall back to HOME/.config"
@@ -436,7 +454,7 @@ case_output_override_beats_xdg_toggle() {
   out="$tmp/out"
   err="$tmp/err"
 
-  HOME="$home" "$script_path" --use-xdg-output --output "$target" --dry-run >"$out" 2>"$err"
+  HOME="$home" run_wrapper --use-xdg-output --output "$target" --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "explicit output should override xdg toggle"
   assert_contains "$target" "$out" "explicit output should be preserved"
@@ -449,7 +467,7 @@ case_comment_builder_supports_email() {
   out="$tmp/out"
   err="$tmp/err"
 
-  USER="alice" HOSTNAME="builder" "$script_path" --comment-email alice@example.com --dry-run >"$out" 2>"$err"
+  USER="alice" HOSTNAME="builder" run_wrapper --comment-email alice@example.com --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "comment email should succeed"
   assert_contains "alice@builder\\ -\\ alice@example.com\\ -" "$out" "comment email should appear in the generated comment"
@@ -466,24 +484,24 @@ case_fido_version_gates() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" SSS_TEST_SSH_VERSION="OpenSSH_8.1p1, OpenSSL test" \
-    "$script_path" --profile hardware --no-fido-verify-required --dry-run >"$out" 2>"$err"
+    run_wrapper --profile hardware --no-fido-verify-required --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "OpenSSH 8.1 should fail for FIDO keys"
   assert_contains "OpenSSH 8.2 or newer is required" "$err" "FIDO floor should be enforced"
 
   PATH="$bin:$PATH" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
-    "$script_path" --profile hardware --dry-run >"$out" 2>"$err"
+    run_wrapper --profile hardware --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "verify-required should fail on OpenSSH 8.3"
   assert_contains "OpenSSH 8.4 or newer is required" "$err" "verify-required floor should be enforced"
 
   PATH="$bin:$PATH" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
-    "$script_path" --profile hardware --no-fido-verify-required --dry-run >"$out" 2>"$err"
+    run_wrapper --profile hardware --no-fido-verify-required --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "FIDO without verify-required should work on OpenSSH 8.3"
 
   PATH="$bin:$PATH" SSS_TEST_SSH_VERSION="OpenSSH_8.1p1, OpenSSL test" \
-    "$script_path" --profile hardware --dry-run -- -t ed25519 >"$out" 2>"$err"
+    run_wrapper --profile hardware --dry-run -- -t ed25519 >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "non-FIDO passthrough override should skip the FIDO version gate"
 }
@@ -503,7 +521,7 @@ case_force_overwrite_preserves_existing_keys() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_MODE="fail" \
-    "$script_path" --force-overwrite >"$out" 2>"$err"
+    run_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "overwrite failures should bubble up"
   assert_equals "old-private" "$(tr -d '\n' <"$target")" "existing private key should be preserved on failure"
@@ -525,7 +543,7 @@ case_force_overwrite_replaces_after_success() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    "$script_path" --force-overwrite >"$out" 2>"$err"
+    run_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "overwrite success should exit 0"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "private key should be replaced after success"
@@ -547,7 +565,7 @@ case_force_overwrite_honors_passthrough_output() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    "$script_path" --force-overwrite -- -f "$target" >"$out" 2>"$err"
+    run_wrapper --force-overwrite -- -f "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "passthrough -f should participate in overwrite handling"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "passthrough -f target private key should be replaced"
@@ -569,7 +587,7 @@ case_force_overwrite_rejects_private_directory_target() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    "$script_path" --force-overwrite --output "$target" >"$out" 2>"$err"
+    run_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "directory private targets should be rejected"
   assert_contains "Refusing to overwrite directory target: $target" "$err" "directory private targets should report a clear error"
@@ -590,7 +608,7 @@ case_force_overwrite_rejects_public_directory_target() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    "$script_path" --force-overwrite --output "$target" >"$out" 2>"$err"
+    run_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "directory public targets should be rejected"
   assert_contains "Refusing to overwrite directory target: ${target}.pub" "$err" "directory public targets should report a clear error"
@@ -611,7 +629,7 @@ case_managed_dir_permissions_warn_and_fix() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    "$script_path" >"$out" 2>"$err"
+    run_wrapper >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "managed dir repair should still succeed"
   assert_contains "Correcting permissions on $home/.ssh to 700" "$err" "managed dir repair should warn"
@@ -633,7 +651,7 @@ case_explicit_managed_output_repairs_parent_dir() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    "$script_path" --output "$target" >"$out" 2>"$err"
+    run_wrapper --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "explicit outputs under ~/.ssh should still succeed"
   assert_contains "Correcting permissions on $home/.ssh to 700" "$err" "explicit managed outputs should still repair ~/.ssh"

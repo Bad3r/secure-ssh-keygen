@@ -13,6 +13,7 @@ Run the relevant checks from the repository root:
 ```sh
 bash -n sss-ssh-keygen.sh
 bash tests/run.sh
+TEST_BASH=/bin/bash bash tests/run.sh
 ./sss-ssh-keygen.sh --dry-run
 ./sss-ssh-keygen.sh --config=./sss-ssh-keygen.conf --dry-run
 ./sss-ssh-keygen.sh --config /tmp/definitely-missing.conf --dry-run
@@ -22,7 +23,8 @@ bash tests/run.sh
 
 If you change validation or profile logic, test both success and refusal paths.
 Include config parsing checks such as `--config=...` support and a missing
-config failure.
+config failure. On macOS, keep the `TEST_BASH=/bin/bash` run in the loop so the
+wrapper is exercised under the stock Bash 3.2 interpreter.
 
 ## Pull request expectations
 
