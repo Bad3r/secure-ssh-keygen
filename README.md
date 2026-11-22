@@ -146,8 +146,11 @@ For example, `--output-suffix github_unsigned_sh` creates
 `id_ed25519_sk_github_unsigned_sh` for the default hardware profile. Suffixes
 must start with a letter or digit and may contain only letters, digits, dots,
 underscores, and hyphens. Two consecutive dots are rejected. Use
-`--output PATH` instead when you need an exact path; it cannot be combined with
-an output suffix.
+`--output PATH` instead when you need an exact path. An exact path replaces a
+suffix from a less specific source, so `--output` or an exported
+`SSH_KEYGEN_OUTPUT` still works when the config file sets
+`SSH_KEYGEN_OUTPUT_SUFFIX`. A path and a suffix from the same source, or a
+suffix on top of a path from a less specific source, are rejected.
 
 Output paths are used literally. A config file is not shell-expanded, so
 `SSH_KEYGEN_OUTPUT=~/.ssh/id_work` or a value that starts with `$` is rejected

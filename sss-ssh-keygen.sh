@@ -187,6 +187,22 @@ state_value() {
   printf '%s' "${!var_name:-}"
 }
 
+# Prints the rank of the most specific source that set a field: 3 for the
+# command line, 2 for the environment, 1 for the config file, 0 for none.
+state_source_rank() {
+  local field="$1"
+
+  if state_is_set "cli" "$field"; then
+    printf '3'
+  elif state_is_set "env" "$field"; then
+    printf '2'
+  elif state_is_set "config" "$field"; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
 set_cli_value() {
   set_state_value "cli" "$1" "$2"
 }
@@ -992,8 +1008,15 @@ require_boolean "$fido_resident" "SSH_KEYGEN_FIDO_RESIDENT"
 
 if [[ -n "$output_suffix" ]]; then
   validate_output_suffix "$output_suffix"
-  [[ -z "$output" ]] ||
-    usage_error "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path"
+  if [[ -n "$output" ]]; then
+    # The suffix only shapes the default name, so an exact path from a more
+    # specific source replaces it. Every other pairing is ambiguous.
+    if (($(state_source_rank "output") > $(state_source_rank "output_suffix"))); then
+      output_suffix=""
+    else
+      usage_error "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path from the same or a less specific source"
+    fi
+  fi
 fi
 
 # Numeric values are forced to base 10: a leading zero would otherwise be read

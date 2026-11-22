@@ -1182,6 +1182,66 @@ case_passthrough_key_type_keeps_wrapper_defaults() {
   assert_not_contains " -b " "$out" "a passthrough software key type should not receive an RSA bit size"
 }
 
+case_output_overrides_less_specific_suffix() {
+  local tmp cfg target out err rc
+
+  tmp="$(new_tempdir)"
+  cfg="$tmp/custom.conf"
+  target="$tmp/custom/id_work"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT_SUFFIX=github_unsigned_sh
+EOF
+
+  run_wrapper --config "$cfg" --output "$target" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "--output should work when the config sets a suffix"
+  assert_contains "output: $target" "$out" "--output should replace a config suffix"
+  assert_not_contains "github_unsigned_sh" "$out" "a replaced config suffix should not reach the output path"
+
+  SSH_KEYGEN_OUTPUT="$target" run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an exported output should work when the config sets a suffix"
+  assert_contains "output: $target" "$out" "an exported output should replace a config suffix"
+
+  SSH_KEYGEN_OUTPUT_SUFFIX="work" run_isolated_wrapper --output "$target" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "--output should work when the environment sets a suffix"
+  assert_contains "output: $target" "$out" "--output should replace an exported suffix"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT_SUFFIX=../bad
+EOF
+
+  run_wrapper --config "$cfg" --output "$target" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a replaced suffix should still be validated"
+
+  cat >"$cfg" <<EOF
+SSH_KEYGEN_OUTPUT=$target
+EOF
+
+  run_wrapper --config "$cfg" --output-suffix work --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a suffix should not replace a config output path"
+  assert_contains "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path" "$err" "a suffix over a config output path should be reported"
+
+  SSH_KEYGEN_OUTPUT="$target" SSH_KEYGEN_OUTPUT_SUFFIX="work" run_isolated_wrapper --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an output path and a suffix from the same source should be rejected"
+
+  cat >"$cfg" <<EOF
+SSH_KEYGEN_OUTPUT=$target
+SSH_KEYGEN_OUTPUT_SUFFIX=work
+EOF
+
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an output path and a suffix in one config file should be rejected"
+}
+
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1229,6 +1289,7 @@ run_case "managed dir special bits do not warn" case_managed_dir_special_bits_do
 run_case "passthrough output bypasses HOME" case_passthrough_output_bypasses_home
 run_case "passthrough empty output is rejected" case_passthrough_empty_output_is_rejected
 run_case "passthrough key type keeps wrapper defaults" case_passthrough_key_type_keeps_wrapper_defaults
+run_case "output overrides a less specific suffix" case_output_overrides_less_specific_suffix
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2
