@@ -92,9 +92,15 @@ The shipped defaults are:
 
 ## Configuration model
 
-The wrapper loads `sss-ssh-keygen.conf` from the repository root by default.
-Use `--config PATH` or `--config=PATH` to load an alternate file. Config files
-are assignment-only: use plain `KEY=VALUE` lines, optionally quoted, and avoid
+The wrapper loads `sss-ssh-keygen.conf` from the directory that holds the
+script by default, and continues with built-in defaults after a warning when
+that file is absent. When the script is started through a symbolic link, for
+example one placed in a directory on `PATH`, the directory of the link is
+checked first and then the directory of the script the link points to. Use `--config PATH`, `--config=PATH`, or the
+`SSS_SSH_KEYGEN_CONFIG` environment variable to load an alternate file; the
+older `SSH_KEYGEN_SECURE_CONFIG` variable is still read at lower precedence. An
+alternate file that does not exist is an error. Config files are
+assignment-only: use plain `KEY=VALUE` lines, optionally quoted, and avoid
 shell syntax or commands.
 
 Exported `SSH_KEYGEN_*` variables remain supported for one-off overrides. The
@@ -142,8 +148,16 @@ For example, `--output-suffix github_unsigned_sh` creates
 `id_ed25519_sk_github_unsigned_sh` for the default hardware profile. Suffixes
 must start with a letter or digit and may contain only letters, digits, dots,
 underscores, and hyphens. Two consecutive dots are rejected. Use
-`--output PATH` instead when you need an exact path; it cannot be combined with
-an output suffix.
+`--output PATH` instead when you need an exact path. An exact path replaces a
+suffix from a less specific source, so `--output` or an exported
+`SSH_KEYGEN_OUTPUT` still works when the config file sets
+`SSH_KEYGEN_OUTPUT_SUFFIX`. A path and a suffix from the same source, or a
+suffix on top of a path from a less specific source, are rejected.
+
+Output paths are used literally. A config file is not shell-expanded, so
+`SSH_KEYGEN_OUTPUT=~/.ssh/id_work` or a value that starts with `$` is rejected
+instead of creating a directory with that name. Give a full path, or prefix
+`./` when such a name is intentional.
 
 The generated comment defaults to `user@host - YYYY-MM-DD`. Use
 `--comment-user`, `--comment-host`, or `--comment-email` to refine the auto
@@ -153,8 +167,19 @@ comment without replacing it entirely. Use `--comment` for a full override.
 
 - Passphrase prompting is the default. Use `--empty-passphrase` only for
   machine accounts or non-interactive workflows that require it.
-- Existing output paths are protected by default. Use `--force-overwrite` only
-  when replacement is intentional.
+- Existing output paths are protected by default, including dangling symlinks
+  that `ssh-keygen` would otherwise write through. Use `--force-overwrite` only
+  when replacement is intentional. A symbolic link at the output path is
+  replaced itself; the file it points to is left alone.
+- `--force-overwrite` generates the new pair in a `.sss-ssh-keygen.*` staging
+  directory next to the output and replaces the old pair only after
+  `ssh-keygen` has produced both files. If a rename fails, the previous files
+  are put back and the new pair is discarded. The two renames remain separate
+  steps: a wrapper that is interrupted or killed between them can leave the new
+  private key next to the old public key. Nothing is deleted in that case. The
+  previous private key and the new public key stay in the staging directory,
+  and `ssh-keygen -y -f PATH` rebuilds a public key from the private key in
+  place.
 - The wrapper uses the OpenSSH private-key format and explicitly sets
   `aes256-ctr` for private-key encryption, matching current `ssh-keygen`
   defaults.
@@ -162,7 +187,13 @@ comment without replacing it entirely. Use `--comment` for a full override.
   `16`; this project raises the cost as a practical baseline for current
   workstations.
 - Extra arguments after `--` are an expert escape hatch. They are forwarded as
-  given and can override wrapper-managed `ssh-keygen` options.
+  given and can override wrapper-managed `ssh-keygen` options. The wrapper
+  interprets two of them: `-f PATH` replaces the output path and receives the
+  same overwrite protection, and `-t TYPE`, in any spelling `ssh-keygen`
+  accepts, selects which type-specific defaults apply. An RSA type keeps the
+  configured bit size, and a FIDO type keeps the application,
+  `verify-required`, and resident settings. Use `--no-fido-verify-required` to
+  create a FIDO key without `verify-required`.
 - Resident keys are not the default. Enable them explicitly with
   `--fido-resident` if portability across hosts is worth the theft tradeoff for
   your use case.
@@ -171,6 +202,7 @@ comment without replacing it entirely. Use `--comment` for a full override.
 
 - `sss-ssh-keygen.sh`: canonical wrapper
 - `sss-ssh-keygen.conf`: shipped default configuration
+- `tests/run.sh`: shell test harness
 
 ## Sources
 

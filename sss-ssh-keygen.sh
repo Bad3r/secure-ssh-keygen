@@ -89,7 +89,8 @@ Options:
   --no-fido-verify-required    omit -O verify-required for FIDO profiles
   --dry-run                    print the command and exit
   --quiet                      add -q
-  --force-overwrite            atomically replace existing key material
+  --force-overwrite            replace existing key material, restoring it if
+                               the swap fails
   --help                       show this help
 
 Config:
@@ -97,7 +98,9 @@ Config:
     1. --config / --config=
     2. SSS_SSH_KEYGEN_CONFIG
     3. SSH_KEYGEN_SECURE_CONFIG
-    4. ./sss-ssh-keygen.conf in the script directory
+    4. sss-ssh-keygen.conf next to the script; when the script is started
+       through a symbolic link, next to the link first and then next to the
+       script it points to
 
   Config files are parsed as assignment-only files. Supported variables:
     SSH_KEYGEN_PROFILE
@@ -187,12 +190,41 @@ state_value() {
   printf '%s' "${!var_name:-}"
 }
 
+# Prints the rank of the most specific source that set a field: 3 for the
+# command line, 2 for the environment, 1 for the config file, 0 for none.
+state_source_rank() {
+  local field="$1"
+
+  if state_is_set "cli" "$field"; then
+    printf '3'
+  elif state_is_set "env" "$field"; then
+    printf '2'
+  elif state_is_set "config" "$field"; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
 set_cli_value() {
   set_state_value "cli" "$1" "$2"
 }
 
 set_config_value() {
   set_state_value "config" "$1" "$2"
+}
+
+# State lives in plain globals, so same-named variables inherited from the
+# environment would otherwise read as values set by the CLI, config, or env layer.
+reset_state_values() {
+  local namespace=""
+  local field=""
+
+  for namespace in cli config env; do
+    for field in config_path "${MERGE_FIELDS[@]}"; do
+      unset "${namespace}_value_${field}" "${namespace}_set_${field}"
+    done
+  done
 }
 
 valid_profiles_csv="$(join_profiles)"
@@ -569,7 +601,7 @@ resolve_default_output_dir() {
   fi
 
   [[ -n "${HOME:-}" ]] ||
-    die "HOME must be set unless --output or SSH_KEYGEN_OUTPUT specifies a path"
+    die "HOME must be set unless --output, SSH_KEYGEN_OUTPUT, or a passthrough -f specifies a path"
 
   printf '%s/.ssh' "$HOME"
 }
@@ -620,10 +652,15 @@ repair_managed_dir_permissions() {
   mode="$(stat_mode "$directory")" ||
     die "Unable to determine permissions for $directory"
 
-  if [[ "$mode" != "700" ]]; then
+  # GNU stat reports setuid, setgid, and sticky bits as a fourth digit, and
+  # chmod 700 leaves them in place on directories.
+  case "$mode" in
+  700 | [0-7]700) ;;
+  *)
     warn "Correcting permissions on $directory to 700"
     chmod 700 "$(normalize_path_arg "$directory")"
-  fi
+    ;;
+  esac
 }
 
 validate_output_suffix() {
@@ -727,10 +764,10 @@ validate_fido_version_requirements() {
   local minimum_major=8
   local minimum_minor=2
   local minimum_label="8.2"
-  local effective_key_type="$1"
+  local key_class="$1"
   local effective_verify_required="$2"
 
-  [[ "$effective_key_type" == *"-sk" ]] || return 0
+  [[ "$key_class" == "fido" ]] || return 0
 
   if [[ "$effective_verify_required" -eq 1 ]]; then
     minimum_minor=4
@@ -746,79 +783,200 @@ validate_fido_version_requirements() {
   fi
 }
 
+# Prints rsa, fido, or other for a key type name as ssh-keygen reads it: short
+# names match without regard to case, and the full key type names such as
+# sk-ssh-ed25519@openssh.com are accepted as well.
+key_type_class() {
+  local name=""
+
+  name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$name" in
+  rsa | ssh-rsa | rsa-sha2-*) printf 'rsa' ;;
+  *-sk | sk-* | *-sk-*) printf 'fido' ;;
+  *) printf 'other' ;;
+  esac
+}
+
 derive_effective_keygen_overrides() {
-  effective_key_type="$key_type"
-  if [[ "$key_type" == *"-sk" && "$fido_verify_required" -eq 1 ]]; then
-    effective_verify_required=1
-  else
-    effective_verify_required=0
-  fi
-  effective_output="$output"
+  local token=""
+  local rest=""
+  local flags=""
+  local letter=""
+  local value=""
+  local value_attached=0
+  local value_option_seen=0
+  local passthrough_verify_required=0
+  local effective_key_type="$key_type"
+
+  passthrough_output=""
+  passthrough_output_present=0
   forwarded_ssh_keygen_args=()
   forwarded_ssh_keygen_args_present=0
 
+  # Tokens are read the way ssh-keygen's getopt reads them: flags may be
+  # clustered, and a value-taking option consumes the rest of its token or the
+  # next argument, whatever that looks like. The value-taking letters are those
+  # followed by a colon in ssh-keygen's option string.
   while (($#)); do
-    case "$1" in
-    -f)
-      if (($# < 2)); then
-        append_forwarded_ssh_keygen_args "$1"
+    token="$1"
+    shift
+
+    if [[ "$token" == "--" ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+      if (($#)); then
+        append_forwarded_ssh_keygen_args "$@"
+      fi
+      break
+    fi
+    if [[ "$token" != -?* || "$token" == --* ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+      continue
+    fi
+
+    rest="${token#-}"
+    flags=""
+    value_option_seen=0
+    while [[ -n "$rest" ]]; do
+      letter="${rest:0:1}"
+      rest="${rest:1}"
+      case "$letter" in
+      [CDEFIMNOPRVYZabfmnrstwz])
+        value_option_seen=1
         break
-      fi
-      effective_output="$2"
-      shift 2
-      ;;
-    -f*)
-      effective_output="${1#-f}"
+        ;;
+      esac
+      flags="${flags}${letter}"
+    done
+
+    if [[ "$value_option_seen" -ne 1 ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+      continue
+    fi
+
+    if [[ -n "$rest" ]]; then
+      value="$rest"
+      value_attached=1
+    elif (($#)); then
+      value="$1"
+      value_attached=0
       shift
+    else
+      # ssh-keygen reports the missing value.
+      append_forwarded_ssh_keygen_args "$token"
+      break
+    fi
+
+    case "$letter" in
+    f)
+      # The wrapper passes its own -f, so only flags clustered ahead of this
+      # one are forwarded.
+      [[ -n "$value" ]] ||
+        usage_error "The passthrough -f option requires a non-empty path"
+      passthrough_output="$value"
+      passthrough_output_present=1
+      if [[ -n "$flags" ]]; then
+        append_forwarded_ssh_keygen_args "-$flags"
+      fi
+      continue
       ;;
-    -t)
-      if (($# < 2)); then
-        append_forwarded_ssh_keygen_args "$1"
-        break
-      fi
-      append_forwarded_ssh_keygen_args "$1" "$2"
-      effective_key_type="$2"
-      if [[ "$effective_key_type" != *"-sk" ]]; then
-        effective_verify_required=0
-      fi
-      shift 2
+    t)
+      effective_key_type="$value"
       ;;
-    -t*)
-      append_forwarded_ssh_keygen_args "$1"
-      effective_key_type="${1#-t}"
-      if [[ "$effective_key_type" != *"-sk" ]]; then
-        effective_verify_required=0
+    O)
+      if [[ "$value" == "verify-required" ]]; then
+        passthrough_verify_required=1
       fi
-      shift
-      ;;
-    -O)
-      if (($# < 2)); then
-        append_forwarded_ssh_keygen_args "$1"
-        break
-      fi
-      append_forwarded_ssh_keygen_args "$1" "$2"
-      if [[ "$2" == "verify-required" ]]; then
-        effective_verify_required=1
-      fi
-      shift 2
-      ;;
-    -O*)
-      append_forwarded_ssh_keygen_args "$1"
-      if [[ "${1#-O}" == "verify-required" ]]; then
-        effective_verify_required=1
-      fi
-      shift
-      ;;
-    *)
-      append_forwarded_ssh_keygen_args "$1"
-      shift
       ;;
     esac
+
+    if [[ "$value_attached" -eq 1 ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+    else
+      append_forwarded_ssh_keygen_args "$token" "$value"
+    fi
   done
 
-  if [[ "$effective_key_type" != *"-sk" ]]; then
-    effective_verify_required=0
+  effective_key_class="$(key_type_class "$effective_key_type")"
+  effective_verify_required=0
+  if [[ "$effective_key_class" == "fido" ]]; then
+    if [[ "$fido_verify_required" -eq 1 || "$passthrough_verify_required" -eq 1 ]]; then
+      effective_verify_required=1
+    fi
   fi
+}
+
+# Fills keygen_command for the given private key path. The dry-run and
+# "Executing" lines show the final path while --force-overwrite runs against a
+# staging path, so both commands come from here.
+#
+# Type-specific defaults follow the effective key type: a passthrough -t wins
+# over the profile's -t inside ssh-keygen, and the key it selects must not
+# lose the RSA size or the FIDO options the wrapper would give that type.
+build_keygen_command() {
+  local target="$1"
+
+  keygen_command=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$target")
+  if [[ "$effective_key_class" == "rsa" ]]; then
+    keygen_command+=(-b "$rsa_bits")
+  fi
+  if [[ "$empty_passphrase" -eq 1 ]]; then
+    keygen_command+=(-N "")
+  fi
+  if [[ "$quiet" -eq 1 ]]; then
+    keygen_command+=(-q)
+  fi
+  if [[ "$effective_key_class" == "fido" ]]; then
+    keygen_command+=(-O "application=${fido_application}")
+    if [[ "$fido_verify_required" -eq 1 ]]; then
+      keygen_command+=(-O verify-required)
+    fi
+    if [[ "$fido_resident" -eq 1 ]]; then
+      keygen_command+=(-O resident)
+    fi
+  fi
+  if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
+    keygen_command+=("${forwarded_ssh_keygen_args[@]}")
+  fi
+}
+
+# Prints the default config path for the script at the given path. A script
+# started through symbolic links is followed link by link, and the first
+# directory along the way that holds a config file wins, so a file next to the
+# link takes precedence over the one next to the real script. The chain is
+# walked by hand because readlink -f and realpath are not available on every
+# supported system.
+resolve_default_config_path() {
+  local path="$1"
+  local directory=""
+  local target=""
+  local hops=0
+
+  # The first directory is kept as the caller named it; the directories
+  # behind a link are resolved physically so that ".." in a link target is
+  # read the way the kernel reads it.
+  directory="$(CDPATH='' cd -- "$(dirname "$(normalize_path_arg "$path")")" && pwd)" ||
+    die "Unable to resolve the directory of $path"
+
+  while [[ ! -e "$directory/sss-ssh-keygen.conf" && -L "$path" ]]; do
+    hops=$((hops + 1))
+    [[ "$hops" -le 40 ]] || die "Too many levels of symbolic links: $1"
+
+    target="$(readlink "$(normalize_path_arg "$path")")" ||
+      die "Unable to read symbolic link: $path"
+    case "$target" in
+    /*) path="$target" ;;
+    *)
+      directory="$(CDPATH='' cd -P -- "$(dirname "$(normalize_path_arg "$path")")" && pwd -P)" ||
+        die "Unable to resolve the directory of $path"
+      path="$directory/$target"
+      ;;
+    esac
+
+    directory="$(CDPATH='' cd -P -- "$(dirname "$(normalize_path_arg "$path")")" && pwd -P)" ||
+      die "Unable to resolve the directory of $path"
+  done
+
+  printf '%s' "$directory/sss-ssh-keygen.conf"
 }
 
 create_temp_output_dir() {
@@ -829,9 +987,127 @@ create_temp_output_dir() {
   mktemp -d "$temp_root/.sss-ssh-keygen.XXXXXX"
 }
 
+# Saves an existing key file under the staging directory without touching the
+# original. A hard link keeps the old file reachable after its name has been
+# renamed over, a symbolic link is recreated, and a copy covers filesystems
+# without hard links.
+save_previous_key_file() {
+  local source="$1"
+  local destination="$2"
+  local link_target=""
+
+  if [[ -L "$source" ]]; then
+    link_target="$(readlink "$(normalize_path_arg "$source")")" || return 1
+    ln -s "$(normalize_path_arg "$link_target")" "$(normalize_path_arg "$destination")"
+    return
+  fi
+
+  # A refused hard link is expected on some filesystems; the copy below
+  # reports its own error if it fails too.
+  if ln "$(normalize_path_arg "$source")" "$(normalize_path_arg "$destination")" 2>/dev/null; then
+    return 0
+  fi
+
+  [[ -f "$source" ]] || return 1
+  cp -p "$(normalize_path_arg "$source")" "$(normalize_path_arg "$destination")"
+}
+
+# Undoes one rename of the swap. A staged file that is still in the staging
+# directory was never renamed into place; rename is atomic, so this also
+# holds when the wrapper was interrupted in the middle of one.
+restore_previous_key_file() {
+  local staged="$1"
+  local installed="$2"
+  local saved="$3"
+
+  if [[ -e "$staged" || -L "$staged" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$saved" ]]; then
+    mv -f "$(normalize_path_arg "$saved")" "$(normalize_path_arg "$installed")"
+  else
+    mv -f "$(normalize_path_arg "$installed")" "$(normalize_path_arg "$staged")"
+  fi
+}
+
+restore_previous_key_material() {
+  local status=0
+
+  restore_previous_key_file "${temp_output}.pub" "${output}.pub" "$saved_public" || status=1
+  restore_previous_key_file "$temp_output" "$output" "$saved_private" || status=1
+
+  return "$status"
+}
+
+# Leaves the staging directory alone and says what it holds. Used whenever
+# the wrapper cannot vouch for the state of the key files.
+report_kept_key_material() {
+  replace_state="kept"
+
+  printf 'error: %s\n' "$1" >&2
+  printf 'error: %s\n' "The previous files are kept in $saved_dir" >&2
+  printf 'error: %s\n' "New files that were not installed are kept in $temp_dir" >&2
+  printf 'error: %s\n' "If $output holds the new private key, its public key can be rebuilt with: ssh-keygen -y -f $output" >&2
+}
+
+# Two files cannot be renamed in one atomic step, so the swap is made
+# recoverable instead: the previous files stay reachable until both renames
+# are done, and a failed or interrupted swap puts them back.
+replace_key_material() {
+  [[ -f "$temp_output" && -f "${temp_output}.pub" ]] ||
+    die "ssh-keygen did not produce both key files; existing key material at $output was left untouched"
+
+  saved_dir="$(mktemp -d "$(normalize_path_arg "$temp_dir")/previous.XXXXXX")" ||
+    die "Unable to create a rollback directory; existing key material at $output was left untouched"
+
+  if [[ -e "$output" || -L "$output" ]]; then
+    save_previous_key_file "$output" "$saved_dir/private" ||
+      die "Unable to save $output for rollback; existing key material was left untouched"
+    saved_private="$saved_dir/private"
+  fi
+  if [[ -e "${output}.pub" || -L "${output}.pub" ]]; then
+    save_previous_key_file "${output}.pub" "$saved_dir/public" ||
+      die "Unable to save ${output}.pub for rollback; existing key material was left untouched"
+    saved_public="$saved_dir/public"
+  fi
+
+  replace_state="swapping"
+  if mv -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "$output")" &&
+    mv -f "$(normalize_path_arg "${temp_output}.pub")" "$(normalize_path_arg "${output}.pub")"; then
+    replace_state="idle"
+    return 0
+  fi
+
+  if restore_previous_key_material; then
+    replace_state="idle"
+    die "Failed to replace the key material at $output; the previous state was restored and the new key pair was discarded"
+  fi
+
+  report_kept_key_material "Failed to replace the key material at $output, and the previous files could not be restored"
+  exit 1
+}
+
 cleanup_temp_artifacts() {
+  # A signal ended the wrapper inside the swap. Bash runs this trap without
+  # waiting for a rename that is still in flight, so nothing is restored or
+  # deleted here: the staging directory keeps every file that was replaced.
+  if [[ "${replace_state:-idle}" == "swapping" ]]; then
+    report_kept_key_material "The replacement of the key material at $output was cut short"
+  fi
+
+  # The staging directory may hold the only copies.
+  if [[ "${replace_state:-idle}" == "kept" ]]; then
+    return 0
+  fi
+
   if [[ -n "${temp_output:-}" ]]; then
     rm -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "${temp_output}.pub")"
+  fi
+
+  if [[ -n "${saved_dir:-}" ]]; then
+    rm -f "$(normalize_path_arg "$saved_dir/private")" "$(normalize_path_arg "$saved_dir/public")"
+    rmdir "$(normalize_path_arg "$saved_dir")" 2>/dev/null || true
   fi
 
   if [[ -n "${temp_dir:-}" ]]; then
@@ -839,8 +1115,7 @@ cleanup_temp_artifacts() {
   fi
 }
 
-script_dir="$(CDPATH='' cd -- "$(dirname "$(normalize_path_arg "$0")")" && pwd)"
-default_config_path="$script_dir/sss-ssh-keygen.conf"
+default_config_path="$(resolve_default_config_path "$0")"
 config_path="$default_config_path"
 config_path_source="implicit-default"
 if [[ -n "${SSH_KEYGEN_SECURE_CONFIG:-}" ]]; then
@@ -855,7 +1130,9 @@ extra_ssh_keygen_args=()
 extra_ssh_keygen_args_present=0
 forwarded_ssh_keygen_args=()
 forwarded_ssh_keygen_args_present=0
+keygen_command=()
 
+reset_state_values
 parse_cli "$@"
 if state_is_set "cli" "config_path"; then
   config_path="$(state_value "cli" "config_path")"
@@ -906,13 +1183,23 @@ require_boolean "$fido_resident" "SSH_KEYGEN_FIDO_RESIDENT"
 
 if [[ -n "$output_suffix" ]]; then
   validate_output_suffix "$output_suffix"
-  [[ -z "$output" ]] ||
-    usage_error "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path"
+  if [[ -n "$output" ]]; then
+    # The suffix only shapes the default name, so an exact path from a more
+    # specific source replaces it. Every other pairing is ambiguous.
+    if (($(state_source_rank "output") > $(state_source_rank "output_suffix"))); then
+      output_suffix=""
+    else
+      usage_error "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path from the same or a less specific source"
+    fi
+  fi
 fi
 
-if [[ ! "$rounds" =~ ^[0-9]+$ ]] || [[ "$rounds" -lt 1 ]]; then
+# Numeric values are forced to base 10: a leading zero would otherwise be read
+# as octal here and as decimal by ssh-keygen.
+if [[ ! "$rounds" =~ ^[0-9]+$ ]] || ((10#$rounds < 1)); then
   usage_error "Invalid rounds value: $rounds"
 fi
+rounds="$((10#$rounds))"
 
 case "$profile" in
 ed25519 | software)
@@ -964,12 +1251,6 @@ fips)
   ;;
 esac
 
-if [[ "$key_type" == "rsa" ]]; then
-  if [[ ! "$rsa_bits" =~ ^[0-9]+$ ]] || [[ "$rsa_bits" -lt 3072 ]]; then
-    usage_error "Invalid RSA bit size: $rsa_bits"
-  fi
-fi
-
 case "$fido_application" in
 ssh:*) ;;
 *)
@@ -977,7 +1258,24 @@ ssh:*) ;;
   ;;
 esac
 
-if [[ -z "$output" ]]; then
+if [[ "$extra_ssh_keygen_args_present" -eq 1 ]]; then
+  derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
+else
+  derive_effective_keygen_overrides
+fi
+
+if [[ "$effective_key_class" == "rsa" ]]; then
+  if [[ ! "$rsa_bits" =~ ^[0-9]+$ ]] || ((10#$rsa_bits < 3072)); then
+    usage_error "Invalid RSA bit size: $rsa_bits"
+  fi
+  rsa_bits="$((10#$rsa_bits))"
+fi
+
+# A passthrough -f is settled first so that the default directory, and with it
+# HOME, is only needed when nothing else names the output.
+if [[ "$passthrough_output_present" -eq 1 ]]; then
+  output="$passthrough_output"
+elif [[ -z "$output" ]]; then
   managed_output_dir="$(resolve_default_output_dir)"
   if [[ -n "$output_suffix" ]]; then
     output="$managed_output_dir/${default_output_basename}_${output_suffix}"
@@ -990,38 +1288,20 @@ if [[ -z "$comment" ]]; then
   comment="$(build_default_comment)"
 fi
 
-if [[ "$extra_ssh_keygen_args_present" -eq 1 ]]; then
-  derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
-else
-  derive_effective_keygen_overrides
-fi
-validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
-output="$effective_output"
+# Config values and quoted arguments are taken literally, so an unexpanded
+# ~ or $VAR prefix would create a directory of that name under the current one.
+case "$output" in
+'~'* | '$'*)
+  usage_error "Output path is not shell-expanded: $output. Use a full path, or prefix ./ if the name is intentional"
+  ;;
+esac
+
+validate_fido_version_requirements "$effective_key_class" "$effective_verify_required"
 output_dir="$(dirname "$(normalize_path_arg "$output")")"
 managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
 
-display_cmd=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$output")
-if [[ "$key_type" == "rsa" ]]; then
-  display_cmd+=(-b "$rsa_bits")
-fi
-if [[ "$empty_passphrase" -eq 1 ]]; then
-  display_cmd+=(-N "")
-fi
-if [[ "$quiet" -eq 1 ]]; then
-  display_cmd+=(-q)
-fi
-if [[ "$key_type" == *"-sk" ]]; then
-  display_cmd+=(-O "application=${fido_application}")
-  if [[ "$fido_verify_required" -eq 1 ]]; then
-    display_cmd+=(-O verify-required)
-  fi
-  if [[ "$fido_resident" -eq 1 ]]; then
-    display_cmd+=(-O resident)
-  fi
-fi
-if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
-  display_cmd+=("${forwarded_ssh_keygen_args[@]}")
-fi
+build_keygen_command "$output"
+display_cmd=("${keygen_command[@]}")
 
 if [[ "$dry_run" -eq 1 ]]; then
   printf 'profile: %s\n' "$canonical_profile"
@@ -1045,12 +1325,20 @@ if [[ "$force_overwrite" -eq 1 ]]; then
   [[ -d "${output}.pub" ]] && die "Refusing to overwrite directory target: ${output}.pub"
 fi
 
-if [[ -e "$output" || -e "${output}.pub" ]] && [[ "$force_overwrite" -ne 1 ]]; then
-  die "Refusing to overwrite existing key material at $output. Use --force-overwrite if replacement is intentional."
+# -L catches dangling symlinks, which -e reports as absent and ssh-keygen
+# would write through.
+if [[ "$force_overwrite" -ne 1 ]]; then
+  if [[ -e "$output" || -L "$output" || -e "${output}.pub" || -L "${output}.pub" ]]; then
+    die "Refusing to overwrite existing key material at $output. Use --force-overwrite if replacement is intentional."
+  fi
 fi
 
 temp_dir=""
 temp_output=""
+saved_dir=""
+saved_private=""
+saved_public=""
+replace_state="idle"
 cmd_output="$output"
 trap cleanup_temp_artifacts EXIT
 
@@ -1060,28 +1348,8 @@ if [[ "$force_overwrite" -eq 1 ]]; then
   cmd_output="$temp_output"
 fi
 
-cmd=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$cmd_output")
-if [[ "$key_type" == "rsa" ]]; then
-  cmd+=(-b "$rsa_bits")
-fi
-if [[ "$empty_passphrase" -eq 1 ]]; then
-  cmd+=(-N "")
-fi
-if [[ "$quiet" -eq 1 ]]; then
-  cmd+=(-q)
-fi
-if [[ "$key_type" == *"-sk" ]]; then
-  cmd+=(-O "application=${fido_application}")
-  if [[ "$fido_verify_required" -eq 1 ]]; then
-    cmd+=(-O verify-required)
-  fi
-  if [[ "$fido_resident" -eq 1 ]]; then
-    cmd+=(-O resident)
-  fi
-fi
-if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
-  cmd+=("${forwarded_ssh_keygen_args[@]}")
-fi
+build_keygen_command "$cmd_output"
+cmd=("${keygen_command[@]}")
 
 printf 'Executing:'
 printf ' %q' "${display_cmd[@]}"
@@ -1090,9 +1358,9 @@ printf '\n'
 "${cmd[@]}"
 
 if [[ "$force_overwrite" -eq 1 ]]; then
-  mv -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "$output")"
-  mv -f "$(normalize_path_arg "${temp_output}.pub")" "$(normalize_path_arg "${output}.pub")"
-  temp_output=""
-  rmdir "$(normalize_path_arg "$temp_dir")"
-  temp_dir=""
+  replace_key_material
+  # ssh-keygen reported the staging path it wrote to.
+  if [[ "$quiet" -ne 1 ]]; then
+    printf 'Replaced key material at %s and %s.pub\n' "$output" "$output"
+  fi
 fi

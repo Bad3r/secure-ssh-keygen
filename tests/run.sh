@@ -11,25 +11,32 @@ else
   test_bash="bash"
 fi
 
+# Exported wrapper settings would redirect the cases below, including the ones
+# that replace key files, to paths outside the test sandbox.
+while IFS='=' read -r env_name _; do
+  if [[ "$env_name" =~ ^(SSH_KEYGEN|SSS_SSH_KEYGEN)_[A-Za-z0-9_]*$ ]]; then
+    unset "$env_name"
+  fi
+done < <(env)
+unset env_name
+
 failures=0
 test_count=0
+failed_test_count=0
 
-cleanup_paths=()
-cleanup_paths_present=0
+test_root="$(mktemp -d)" || exit 1
+[[ -d "$test_root" ]] || exit 1
 
 cleanup() {
-  local path=""
-
-  if [[ "$cleanup_paths_present" -ne 1 ]]; then
-    return 0
-  fi
-
-  for path in "${cleanup_paths[@]}"; do
-    rm -rf -- "$path"
-  done
+  rm -rf -- "$test_root"
 }
 
 trap cleanup EXIT
+
+# Cases that write key files load this empty config instead of the repository
+# default, so a locally edited sss-ssh-keygen.conf cannot redirect their output.
+isolated_config="$test_root/isolated.conf"
+: >"$isolated_config"
 
 record_failure() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -45,6 +52,10 @@ run_script() {
 
 run_wrapper() {
   run_script "$script_path" "$@"
+}
+
+run_isolated_wrapper() {
+  run_wrapper --config "$isolated_config" "$@"
 }
 
 assert_contains() {
@@ -109,11 +120,7 @@ assert_equals() {
 }
 
 new_tempdir() {
-  local dir
-  dir="$(mktemp -d)"
-  cleanup_paths+=("$dir")
-  cleanup_paths_present=1
-  printf '%s' "$dir"
+  mktemp -d "$test_root/case.XXXXXX"
 }
 
 write_stub_binaries() {
@@ -159,6 +166,9 @@ case "${SSS_TEST_SSH_KEYGEN_MODE:-success}" in
 success)
   printf '%s\n' "${SSS_TEST_PRIVATE_CONTENT:-stub-private}" >"$output"
   printf '%s\n' "${SSS_TEST_PUBLIC_CONTENT:-stub-public}" >"${output}.pub"
+  ;;
+private-only)
+  printf '%s\n' "${SSS_TEST_PRIVATE_CONTENT:-stub-private}" >"$output"
   ;;
 fail)
   printf 'stub ssh-keygen failure\n' >&2
@@ -209,13 +219,110 @@ write_bsd_portability_shims() {
   write_no_double_dash_shim "$bin_dir" "rmdir" "$(command -v rmdir)" "$original_path"
 }
 
+# Shims that fail or interrupt chosen steps of the --force-overwrite swap.
+# SSS_TEST_MV_FAIL, SSS_TEST_MV_TERM_BEFORE, and SSS_TEST_MV_TERM_AFTER take a
+# list of steps: install-private, install-public, or restore. TERM_BEFORE
+# signals the wrapper and then holds the rename back, so the rename is still
+# pending when the signal arrives. SSS_TEST_RM_DELAY slows every rm by that
+# many seconds, which keeps a cleanup busy while a pending rename lands.
+write_swap_fault_shims() {
+  local bin_dir="$1"
+  local real_mv real_ln real_cp real_rm
+
+  real_mv="$(command -v mv)"
+  real_ln="$(command -v ln)"
+  real_cp="$(command -v cp)"
+  real_rm="$(command -v rm)"
+
+  cat >"$bin_dir/mv" <<EOF
+#!/bin/sh
+source_path=""
+target_path=""
+for arg in "\$@"; do
+  source_path="\$target_path"
+  target_path="\$arg"
+done
+
+step="other"
+case "\$source_path" in
+*/previous.*/*) step="restore" ;;
+*/.sss-ssh-keygen.*/*)
+  case "\$target_path" in
+  *.pub) step="install-public" ;;
+  *) step="install-private" ;;
+  esac
+  ;;
+esac
+
+case " \${SSS_TEST_MV_FAIL:-} " in
+*" \$step "*)
+  printf 'stub mv failure: %s\n' "\$step" >&2
+  exit 1
+  ;;
+esac
+
+case " \${SSS_TEST_MV_TERM_BEFORE:-} " in
+*" \$step "*)
+  kill -TERM "\$PPID"
+  sleep 1
+  ;;
+esac
+
+"$real_mv" "\$@" || exit 1
+
+case " \${SSS_TEST_MV_TERM_AFTER:-} " in
+*" \$step "*) kill -TERM "\$PPID" ;;
+esac
+exit 0
+EOF
+
+  cat >"$bin_dir/ln" <<EOF
+#!/bin/sh
+if [ "\${SSS_TEST_LN_FAIL:-0}" = "1" ] && [ "\$1" != "-s" ]; then
+  printf 'stub ln failure\n' >&2
+  exit 1
+fi
+exec "$real_ln" "\$@"
+EOF
+
+  cat >"$bin_dir/cp" <<EOF
+#!/bin/sh
+if [ "\${SSS_TEST_CP_FAIL:-0}" = "1" ]; then
+  printf 'stub cp failure\n' >&2
+  exit 1
+fi
+exec "$real_cp" "\$@"
+EOF
+
+  cat >"$bin_dir/rm" <<EOF
+#!/bin/sh
+if [ -n "\${SSS_TEST_RM_DELAY:-}" ]; then
+  sleep "\$SSS_TEST_RM_DELAY"
+fi
+exec "$real_rm" "\$@"
+EOF
+
+  chmod +x "$bin_dir/mv" "$bin_dir/ln" "$bin_dir/cp" "$bin_dir/rm"
+}
+
+staging_leftovers() {
+  find "$1" -name '.sss-ssh-keygen.*'
+}
+
 run_case() {
   local name="$1"
   shift
 
+  local failures_before="$failures"
+
   test_count=$((test_count + 1))
-  printf 'ok: %s\n' "$name"
   "$@"
+  if [[ "$failures" -eq "$failures_before" ]]; then
+    printf 'ok: %s\n' "$name"
+  else
+    failed_test_count=$((failed_test_count + 1))
+    printf 'not ok: %s\n' "$name"
+  fi
 }
 
 case_no_bash4_assoc_arrays() {
@@ -223,7 +330,18 @@ case_no_bash4_assoc_arrays() {
 }
 
 case_no_gnu_only_double_dash_for_path_utils() {
-  assert_no_match '\\b(chmod|mkdir|mv|rmdir|dirname|basename|stat)\\b[^[:cntrl:]]* -- ' \
+  local tmp sample
+  local pattern='(^|[^[:alnum:]_])(chmod|mkdir|mv|rmdir|dirname|basename|stat)[^[:alnum:]_][^[:cntrl:]]* -- '
+
+  tmp="$(new_tempdir)"
+  sample="$tmp/sample.sh"
+  printf '  mkdir -p -- dir\n' >"$sample"
+
+  if ! grep -Eq "$pattern" "$sample"; then
+    record_failure "double-dash pattern should match a known GNU-only invocation"
+  fi
+
+  assert_no_match "$pattern" \
     "$script_path" \
     "wrapper should avoid GNU-only double-dash usage in path utilities"
 }
@@ -634,19 +752,19 @@ case_filesystem_utils_stay_portable_without_double_dash() {
   write_bsd_portability_shims "$bin"
   printf 'old-private\n' >"$target"
   printf 'old-public\n' >"${target}.pub"
-  /bin/chmod 755 "$home/.ssh"
+  chmod 755 "$home/.ssh"
   out="$tmp/out"
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "overwrite path should stay portable without GNU-only -- handling"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "portable overwrite should still replace the private key"
   assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "portable overwrite should still replace the public key"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --output "$custom_target" >"$out" 2>"$err"
+    run_isolated_wrapper --output "$custom_target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "custom output path should stay portable without GNU-only -- handling"
   assert_equals "stub-private" "$(tr -d '\n' <"$custom_target")" "portable mkdir path should create the private key"
@@ -701,7 +819,7 @@ case_force_overwrite_preserves_existing_keys() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_MODE="fail" \
-    run_wrapper --force-overwrite >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "overwrite failures should bubble up"
   assert_equals "old-private" "$(tr -d '\n' <"$target")" "existing private key should be preserved on failure"
@@ -723,11 +841,13 @@ case_force_overwrite_replaces_after_success() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "overwrite success should exit 0"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "private key should be replaced after success"
   assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "public key should be replaced after success"
+  assert_contains "Replaced key material at $target and ${target}.pub" "$out" "overwrite success should report the final key paths"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "overwrite success should not leave staging files behind"
 }
 
 case_force_overwrite_honors_passthrough_output() {
@@ -745,7 +865,7 @@ case_force_overwrite_honors_passthrough_output() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite -- -f "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite -- -f "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "passthrough -f should participate in overwrite handling"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "passthrough -f target private key should be replaced"
@@ -767,7 +887,7 @@ case_force_overwrite_rejects_private_directory_target() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "directory private targets should be rejected"
   assert_contains "Refusing to overwrite directory target: $target" "$err" "directory private targets should report a clear error"
@@ -788,7 +908,7 @@ case_force_overwrite_rejects_public_directory_target() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "directory public targets should be rejected"
   assert_contains "Refusing to overwrite directory target: ${target}.pub" "$err" "directory public targets should report a clear error"
@@ -809,7 +929,7 @@ case_managed_dir_permissions_warn_and_fix() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper >"$out" 2>"$err"
+    run_isolated_wrapper >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "managed dir repair should still succeed"
   assert_contains "Correcting permissions on $home/.ssh to 700" "$err" "managed dir repair should warn"
@@ -831,12 +951,708 @@ case_explicit_managed_output_repairs_parent_dir() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --output "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "explicit outputs under ~/.ssh should still succeed"
   assert_contains "Correcting permissions on $home/.ssh to 700" "$err" "explicit managed outputs should still repair ~/.ssh"
   mode="$(stat -c '%a' "$home/.ssh" 2>/dev/null || stat -f '%Lp' "$home/.ssh")"
   assert_equals "700" "$mode" "explicit managed outputs should still repair ~/.ssh to 700"
+}
+
+case_numeric_values_use_base_ten() {
+  local tmp out err rc
+
+  tmp="$(new_tempdir)"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  run_wrapper --profile fips --rsa-bits 02048 --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "zero-padded rsa bits below the minimum should exit 2"
+  assert_contains "Invalid RSA bit size: 02048" "$err" "zero-padded rsa bits below the minimum should be rejected"
+
+  run_wrapper --profile fips --rsa-bits 04096 --rounds 08 --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "zero-padded numeric values should be accepted as decimal"
+  assert_contains "-b 4096" "$out" "zero-padded rsa bits should be passed on as decimal"
+  assert_contains "-a 8 " "$out" "zero-padded rounds should be passed on as decimal"
+  assert_not_contains "value too great for base" "$err" "zero-padded values should not be read as octal"
+}
+
+case_output_rejects_unexpanded_shell_prefix() {
+  local tmp cfg out err rc
+
+  tmp="$(new_tempdir)"
+  cfg="$tmp/custom.conf"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT=~/.ssh/id_work
+EOF
+
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "literal tilde output should exit 2"
+  assert_contains "Output path is not shell-expanded: ~/.ssh/id_work" "$err" "literal tilde output should be reported"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT="$HOME/.ssh/id_work"
+EOF
+
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "literal variable output should exit 2"
+  assert_contains "Output path is not shell-expanded" "$err" "literal variable output should be reported"
+
+  run_wrapper --output "./~literal" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an explicit ./ prefix should keep literal names usable"
+  assert_contains "output: ./~literal" "$out" "an explicit ./ prefix should be preserved"
+
+  # The shell leaves a tilde in the middle of a word alone.
+  run_wrapper --dry-run -- -f~/.ssh/id_work >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "literal tilde passthrough output should exit 2"
+  assert_contains "Output path is not shell-expanded: ~/.ssh/id_work" "$err" "literal tilde passthrough output should be reported"
+}
+
+case_passthrough_option_values_are_not_reparsed() {
+  local tmp home out err rc
+
+  tmp="$(new_tempdir)"
+  home="$tmp/home"
+  mkdir -p "$home"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_wrapper --dry-run -- -N -fsecret -C "-t rsa" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "passthrough option values should be accepted"
+  assert_contains "output: $home/.ssh/id_ed25519" "$out" "a passthrough value starting with -f should not change the output path"
+  assert_contains "-N -fsecret" "$out" "a passthrough value starting with -f should stay attached to its option"
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -qN -fsecret >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a value after clustered passthrough flags should be accepted"
+  assert_contains "output: $home/.ssh/id_ed25519" "$out" "a value after clustered flags should not change the output path"
+  assert_contains "-qN -fsecret" "$out" "a value after clustered flags should stay attached to its option"
+}
+
+case_passthrough_clustered_output_is_honored() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$tmp/keys/id_custom"
+  mkdir -p "$bin" "$home/.ssh" "$tmp/keys"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -qf "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a clustered passthrough -f should be accepted"
+  assert_contains "output: $target" "$out" "a clustered passthrough -f should set the output path"
+  assert_contains " -f $target -q" "$out" "flags clustered ahead of -f should still be forwarded"
+  assert_not_contains "-qf" "$out" "a clustered passthrough -f should not be forwarded a second time"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper -- -qf "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a clustered passthrough -f should get overwrite protection"
+  assert_contains "Refusing to overwrite existing key material at $target" "$err" "a clustered passthrough -f should report the protected path"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a clustered passthrough -f should leave the private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a clustered passthrough -f should leave the public key in place"
+  assert_not_exists "$home/.ssh/id_ed25519" "a clustered passthrough -f should not fall back to the default path"
+}
+
+case_inherited_state_variables_are_ignored() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$home" USER="alice" HOSTNAME="host" cli_set_profile=1 cli_value_profile=rsa4096 \
+    run_wrapper --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "inherited state variables should not break a dry run"
+  assert_contains "profile: ed25519" "$out" "inherited state variables should not select a profile"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    cli_set_force_overwrite=1 cli_value_force_overwrite=1 \
+    run_isolated_wrapper >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "inherited state variables should not enable overwrite"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "inherited state variables should not replace the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "inherited state variables should not replace the public key"
+}
+
+case_dangling_symlink_output_is_refused() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$tmp/keys/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh" "$tmp/keys"
+  write_stub_binaries "$bin"
+  ln -s "$tmp/elsewhere" "$target"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --output "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "dangling symlink targets should be refused"
+  assert_contains "Refusing to overwrite existing key material at $target" "$err" "dangling symlink targets should report a clear error"
+  assert_not_exists "$tmp/elsewhere" "a private key should not be written through a dangling symlink"
+}
+
+case_force_overwrite_requires_both_key_files() {
+  local tmp bin home target out err rc leftover
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_MODE="private-only" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "an incomplete key pair should fail the overwrite"
+  assert_contains "ssh-keygen did not produce both key files" "$err" "an incomplete key pair should report a clear error"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an incomplete key pair should leave the private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an incomplete key pair should leave the public key in place"
+  leftover="$(find "$home/.ssh" -name '.sss-ssh-keygen.*')"
+  assert_equals "" "$leftover" "an incomplete key pair should not leave temporary key material behind"
+}
+
+case_managed_dir_special_bits_do_not_warn() {
+  local tmp bin home out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  chmod 2700 "$home/.ssh" 2>/dev/null || chmod 700 "$home/.ssh"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a setgid 700 managed dir should still succeed"
+  assert_not_contains "Correcting permissions" "$err" "a setgid 700 managed dir should not be reported as needing repair"
+}
+
+case_passthrough_output_bypasses_home() {
+  local tmp target out err rc
+
+  tmp="$(new_tempdir)"
+  target="$tmp/custom/id_ed25519"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -f "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough -f should bypass HOME-based default resolution"
+  assert_contains "output: $target" "$out" "a passthrough -f should be reflected in dry-run output"
+
+  HOME="" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -q >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "passthrough arguments without -f should still need HOME"
+  assert_contains "HOME must be set" "$err" "passthrough arguments without -f should report the missing HOME"
+}
+
+case_passthrough_empty_output_is_rejected() {
+  local tmp bin home out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_LOG="$tmp/keygen.log" \
+    run_isolated_wrapper -- -f "" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an empty passthrough -f should exit 2"
+  assert_contains "The passthrough -f option requires a non-empty path" "$err" "an empty passthrough -f should be reported"
+  assert_not_exists "$tmp/keygen.log" "an empty passthrough -f should not reach ssh-keygen"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_LOG="$tmp/keygen.log" \
+    run_isolated_wrapper -- -qf "" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an empty clustered passthrough -f should exit 2"
+  assert_not_exists "$tmp/keygen.log" "an empty clustered passthrough -f should not reach ssh-keygen"
+}
+
+case_passthrough_key_type_keeps_wrapper_defaults() {
+  local tmp bin home out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  mkdir -p "$bin" "$home"
+  write_stub_binaries "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -t ed25519-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough FIDO key type should be accepted"
+  assert_contains "-O application=ssh: -O verify-required -t ed25519-sk" "$out" "a passthrough FIDO key type should keep the FIDO defaults"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --no-fido-verify-required --fido-resident -- -t ecdsa-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "wrapper FIDO flags should apply to a passthrough FIDO key type"
+  assert_contains "-O application=ssh: -O resident -t ecdsa-sk" "$out" "wrapper FIDO flags should shape a passthrough FIDO key"
+  assert_not_contains "verify-required" "$out" "--no-fido-verify-required should still apply to a passthrough FIDO key type"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
+    run_isolated_wrapper --dry-run -- -t ed25519-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "the default verify-required should gate a passthrough FIDO key type on OpenSSH 8.3"
+  assert_contains "OpenSSH 8.4 or newer is required" "$err" "the verify-required floor should cover a passthrough FIDO key type"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
+    run_isolated_wrapper --dry-run -- -O verify-required -t rsa -t ed25519-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a passthrough verify-required should survive an intermediate -t"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --profile hardware -- -t ed25519 >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough software key type should be accepted on a FIDO profile"
+  assert_not_contains "-O " "$out" "a passthrough software key type should not receive FIDO options"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="4096" \
+    run_isolated_wrapper --dry-run -- -t rsa >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough RSA key type should be accepted"
+  assert_contains "-b 4096 -t rsa" "$out" "a passthrough RSA key type should keep the configured bit size"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="2048" \
+    run_isolated_wrapper --dry-run -- -t rsa >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a passthrough RSA key type should enforce the RSA minimum"
+  assert_contains "Invalid RSA bit size: 2048" "$err" "a passthrough RSA key type should report a weak bit size"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --profile fips -- -t ed25519 >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough software key type should be accepted on an RSA profile"
+  assert_not_contains " -b " "$out" "a passthrough software key type should not receive an RSA bit size"
+
+  # ssh-keygen matches short names without regard to case and accepts the
+  # full key type names.
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -t ED25519-SK >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an upper-case passthrough FIDO key type should be accepted"
+  assert_contains "-O application=ssh: -O verify-required -t ED25519-SK" "$out" "an upper-case passthrough FIDO key type should keep the FIDO defaults"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
+    run_isolated_wrapper --dry-run -- -t sk-ssh-ed25519@openssh.com >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a full passthrough FIDO key type name should reach the version gate"
+  assert_contains "OpenSSH 8.4 or newer is required" "$err" "a full passthrough FIDO key type name should keep verify-required"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -t sk-ecdsa-sha2-nistp256@openssh.com >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a full passthrough ECDSA FIDO key type name should be accepted"
+  assert_contains "-O application=ssh: -O verify-required -t" "$out" "a full passthrough ECDSA FIDO key type name should keep the FIDO defaults"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="4096" \
+    run_isolated_wrapper --dry-run -- -t RSA >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an upper-case passthrough RSA key type should be accepted"
+  assert_contains "-b 4096 -t RSA" "$out" "an upper-case passthrough RSA key type should keep the configured bit size"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="2048" \
+    run_isolated_wrapper --dry-run -- -t ssh-rsa >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a full passthrough RSA key type name should enforce the RSA minimum"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --profile hardware -- -t ED25519 >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an upper-case passthrough software key type should be accepted on a FIDO profile"
+  assert_not_contains "-O " "$out" "an upper-case passthrough software key type should not receive FIDO options"
+}
+
+case_output_overrides_less_specific_suffix() {
+  local tmp cfg target out err rc
+
+  tmp="$(new_tempdir)"
+  cfg="$tmp/custom.conf"
+  target="$tmp/custom/id_work"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT_SUFFIX=github_unsigned_sh
+EOF
+
+  run_wrapper --config "$cfg" --output "$target" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "--output should work when the config sets a suffix"
+  assert_contains "output: $target" "$out" "--output should replace a config suffix"
+  assert_not_contains "github_unsigned_sh" "$out" "a replaced config suffix should not reach the output path"
+
+  SSH_KEYGEN_OUTPUT="$target" run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an exported output should work when the config sets a suffix"
+  assert_contains "output: $target" "$out" "an exported output should replace a config suffix"
+
+  SSH_KEYGEN_OUTPUT_SUFFIX="work" run_isolated_wrapper --output "$target" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "--output should work when the environment sets a suffix"
+  assert_contains "output: $target" "$out" "--output should replace an exported suffix"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT_SUFFIX=../bad
+EOF
+
+  run_wrapper --config "$cfg" --output "$target" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a replaced suffix should still be validated"
+
+  cat >"$cfg" <<EOF
+SSH_KEYGEN_OUTPUT=$target
+EOF
+
+  run_wrapper --config "$cfg" --output-suffix work --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a suffix should not replace a config output path"
+  assert_contains "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path" "$err" "a suffix over a config output path should be reported"
+
+  SSH_KEYGEN_OUTPUT="$target" SSH_KEYGEN_OUTPUT_SUFFIX="work" run_isolated_wrapper --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an output path and a suffix from the same source should be rejected"
+
+  cat >"$cfg" <<EOF
+SSH_KEYGEN_OUTPUT=$target
+SSH_KEYGEN_OUTPUT_SUFFIX=work
+EOF
+
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an output path and a suffix in one config file should be rejected"
+}
+
+case_symlinked_script_finds_config() {
+  local tmp real real_physical out err rc
+
+  tmp="$(new_tempdir)"
+  real="$tmp/real"
+  mkdir -p "$real" "$tmp/bin" "$tmp/far" "$tmp/home"
+  cp "$script_path" "$real/sss-ssh-keygen.sh"
+  chmod +x "$real/sss-ssh-keygen.sh"
+  real_physical="$(CDPATH='' cd -P "$real" && pwd -P)"
+  ln -s "../real/sss-ssh-keygen.sh" "$tmp/bin/keygen"
+  ln -s "$tmp/bin/keygen" "$tmp/far/keygen"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a symlinked script without any config should fall back to built-in defaults"
+  assert_contains "warning: Default config file not found: $real_physical/sss-ssh-keygen.conf; continuing" "$err" "a symlinked script should look for the config next to the real script"
+
+  printf 'SSH_KEYGEN_PROFILE=rsa4096\n' >"$real/sss-ssh-keygen.conf"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a symlinked script should load the config next to the real script"
+  assert_contains "profile: rsa4096" "$out" "a symlinked script should apply the config next to the real script"
+  assert_not_contains "Default config file not found" "$err" "a symlinked script should not warn when the real script has a config"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/bin/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a relative symlink should resolve against its own directory"
+  assert_contains "profile: rsa4096" "$out" "a relative symlink should reach the config next to the real script"
+
+  printf 'SSH_KEYGEN_PROFILE=fips\n' >"$tmp/bin/sss-ssh-keygen.conf"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a config next to an intermediate link should be accepted"
+  assert_contains "profile: fips" "$out" "the first config along the link chain should win"
+
+  printf 'SSH_KEYGEN_PROFILE=rsa3072\n' >"$tmp/far/sss-ssh-keygen.conf"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a config next to the invoked link should be accepted"
+  assert_contains "profile: rsa3072" "$out" "a config next to the invoked link should win over the ones behind it"
+}
+
+case_force_overwrite_restores_after_failed_rename() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed public key rename should fail the overwrite"
+  assert_contains "the previous state was restored and the new key pair was discarded" "$err" "a failed public key rename should report the rollback"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a failed public key rename should restore the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a failed public key rename should leave the public key in place"
+  assert_not_contains "Replaced key material" "$out" "a failed public key rename should not report success"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a rolled back overwrite should not leave staging files behind"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-private" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed private key rename should fail the overwrite"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a failed private key rename should leave the private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a failed private key rename should not touch the public key"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a failed private key rename should not leave staging files behind"
+
+  rm -f "${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail when only a private key existed"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a lone private key should be restored"
+  assert_not_exists "${target}.pub" "a rolled back overwrite should not create a public key"
+
+  rm -f "$target"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail when no key existed"
+  assert_not_exists "$target" "a rolled back overwrite should not leave half of a new pair"
+  assert_not_exists "${target}.pub" "a rolled back overwrite should not leave a new public key"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a rolled back first-time key should not leave staging files behind"
+}
+
+case_force_overwrite_keeps_material_when_rollback_fails() {
+  local tmp bin home target out err rc staging saved
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public restore" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rollback should fail the overwrite"
+  assert_contains "the previous files could not be restored" "$err" "a failed rollback should be reported"
+  assert_contains "ssh-keygen -y -f $target" "$err" "a failed rollback should explain how to rebuild the public key"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "the fixture should leave the new private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "the fixture should leave the old public key in place"
+
+  staging="$(staging_leftovers "$home/.ssh")"
+  saved="$(find "$home/.ssh" -path '*/previous.*/private')"
+  assert_contains "The previous files are kept in $staging/previous." "$err" "a failed rollback should name the directory with the previous files"
+  assert_contains "New files that were not installed are kept in $staging" "$err" "a failed rollback should name the directory with the new files"
+  if [[ -f "$saved" ]]; then
+    assert_equals "old-private" "$(tr -d '\n' <"$saved")" "a failed rollback should keep the previous private key"
+  else
+    record_failure "a failed rollback should keep the previous private key on disk"
+  fi
+  if [[ -f "$staging/id_ed25519.pub" ]]; then
+    assert_equals "stub-public" "$(tr -d '\n' <"$staging/id_ed25519.pub")" "a failed rollback should keep the new public key"
+  else
+    record_failure "a failed rollback should keep the new public key on disk"
+  fi
+}
+
+case_force_overwrite_handles_symlink_targets() {
+  local tmp bin home target out err rc vault_key
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  vault_key="$tmp/vault/id_ed25519"
+  mkdir -p "$tmp/vault"
+  printf 'vault-private\n' >"$vault_key"
+  ln -s "$vault_key" "$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail when the private key is a symlink"
+  if [[ -L "$target" ]]; then
+    assert_equals "$vault_key" "$(readlink "$target")" "a rolled back overwrite should restore the symlink target"
+  else
+    record_failure "a rolled back overwrite should restore the symlink itself"
+  fi
+  assert_equals "vault-private" "$(tr -d '\n' <"$vault_key")" "a rolled back overwrite should not touch the file behind the symlink"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a rolled back overwrite should leave the public key next to the symlink"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "overwriting a symlinked private key should succeed"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "overwriting a symlinked private key should install the new key"
+  assert_equals "vault-private" "$(tr -d '\n' <"$vault_key")" "overwriting a symlinked private key should replace the link, not the file behind it"
+}
+
+case_force_overwrite_rollback_without_hard_links() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_LN_FAIL="1" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail without hard links"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a copied backup should restore the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a copied backup should leave the public key in place"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a copied backup should be cleaned up after the rollback"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_LN_FAIL="1" SSS_TEST_CP_FAIL="1" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "the overwrite should be refused when the previous key cannot be saved"
+  assert_contains "Unable to save $target for rollback; existing key material was left untouched" "$err" "an unsaved previous key should be reported"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an unsaved previous key should stay in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an unsaved previous key should keep its public key"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a refused overwrite should not leave staging files behind"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_LN_FAIL="1" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "the overwrite should succeed without hard links"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "the overwrite should install the private key without hard links"
+  assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "the overwrite should install the public key without hard links"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a copied backup should be removed after a successful overwrite"
+}
+
+case_force_overwrite_keeps_material_when_interrupted() {
+  local tmp bin home target out err rc staging saved
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  # The subshell keeps the shell's "Terminated" notice out of the test output.
+  (
+    PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_TERM_AFTER="install-private" \
+      run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  ) 2>/dev/null
+  rc=$?
+  assert_equals "143" "$rc" "a wrapper terminated between the renames should die from the signal"
+  assert_contains "The replacement of the key material at $target was cut short" "$err" "an interrupted overwrite should be reported"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an interrupted overwrite should leave the public key that was not replaced"
+
+  staging="$(staging_leftovers "$home/.ssh")"
+  saved="$(find "$home/.ssh" -path '*/previous.*/private')"
+  assert_contains "The previous files are kept in $staging/previous." "$err" "an interrupted overwrite should name the directory with the previous files"
+  if [[ -f "$saved" ]]; then
+    assert_equals "old-private" "$(tr -d '\n' <"$saved")" "an interrupted overwrite should keep the previous private key"
+  else
+    record_failure "an interrupted overwrite should keep the previous private key on disk"
+  fi
+  if [[ -f "$staging/id_ed25519.pub" ]]; then
+    assert_equals "stub-public" "$(tr -d '\n' <"$staging/id_ed25519.pub")" "an interrupted overwrite should keep the new public key"
+  else
+    record_failure "an interrupted overwrite should keep the new public key on disk"
+  fi
+
+  # Bash runs the exit trap without waiting for a rename that is still
+  # pending. A cleanup that deleted the saved files at that point would lose
+  # the previous private key once the rename lands; the slow rm gives the
+  # rename time to do so.
+  rm -rf "$home/.ssh"
+  mkdir -p "$home/.ssh"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  (
+    PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_TERM_BEFORE="install-private" SSS_TEST_RM_DELAY="2" \
+      run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  ) 2>/dev/null
+  rc=$?
+  assert_equals "143" "$rc" "a wrapper terminated during a rename should die from the signal"
+  saved="$(find "$home/.ssh" -path '*/previous.*/private')"
+  if [[ -f "$saved" ]]; then
+    assert_equals "old-private" "$(tr -d '\n' <"$saved")" "a rename that outlives the wrapper should not cost the previous private key"
+  else
+    record_failure "a rename that outlives the wrapper should leave the previous private key on disk"
+  fi
 }
 
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
@@ -875,9 +1691,27 @@ run_case "overwrite rejects private directory targets" case_force_overwrite_reje
 run_case "overwrite rejects public directory targets" case_force_overwrite_rejects_public_directory_target
 run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_fix
 run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
+run_case "numeric values use base ten" case_numeric_values_use_base_ten
+run_case "output rejects unexpanded shell prefix" case_output_rejects_unexpanded_shell_prefix
+run_case "passthrough option values are not reparsed" case_passthrough_option_values_are_not_reparsed
+run_case "passthrough clustered output is honored" case_passthrough_clustered_output_is_honored
+run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
+run_case "dangling symlink output is refused" case_dangling_symlink_output_is_refused
+run_case "overwrite requires both key files" case_force_overwrite_requires_both_key_files
+run_case "managed dir special bits do not warn" case_managed_dir_special_bits_do_not_warn
+run_case "passthrough output bypasses HOME" case_passthrough_output_bypasses_home
+run_case "passthrough empty output is rejected" case_passthrough_empty_output_is_rejected
+run_case "passthrough key type keeps wrapper defaults" case_passthrough_key_type_keeps_wrapper_defaults
+run_case "output overrides a less specific suffix" case_output_overrides_less_specific_suffix
+run_case "symlinked script finds config" case_symlinked_script_finds_config
+run_case "overwrite restores after a failed rename" case_force_overwrite_restores_after_failed_rename
+run_case "overwrite keeps material when rollback fails" case_force_overwrite_keeps_material_when_rollback_fails
+run_case "overwrite handles symlink targets" case_force_overwrite_handles_symlink_targets
+run_case "overwrite rollback without hard links" case_force_overwrite_rollback_without_hard_links
+run_case "overwrite keeps material when interrupted" case_force_overwrite_keeps_material_when_interrupted
 
 if [[ "$failures" -gt 0 ]]; then
-  printf 'FAILED %s/%s tests\n' "$failures" "$test_count" >&2
+  printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2
   exit 1
 fi
 
