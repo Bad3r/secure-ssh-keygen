@@ -92,9 +92,13 @@ The shipped defaults are:
 
 ## Configuration model
 
-The wrapper loads `sss-ssh-keygen.conf` from the repository root by default.
-Use `--config PATH` or `--config=PATH` to load an alternate file. Config files
-are assignment-only: use plain `KEY=VALUE` lines, optionally quoted, and avoid
+The wrapper loads `sss-ssh-keygen.conf` from the directory that holds the
+script by default, and continues with built-in defaults after a warning when
+that file is absent. Use `--config PATH`, `--config=PATH`, or the
+`SSS_SSH_KEYGEN_CONFIG` environment variable to load an alternate file; the
+older `SSH_KEYGEN_SECURE_CONFIG` variable is still read at lower precedence. An
+alternate file that does not exist is an error. Config files are
+assignment-only: use plain `KEY=VALUE` lines, optionally quoted, and avoid
 shell syntax or commands.
 
 Exported `SSH_KEYGEN_*` variables remain supported for one-off overrides. The
@@ -178,6 +182,7 @@ comment without replacing it entirely. Use `--comment` for a full override.
 
 - `sss-ssh-keygen.sh`: canonical wrapper
 - `sss-ssh-keygen.conf`: shipped default configuration
+- `tests/run.sh`: shell test harness
 
 ## Sources
 
