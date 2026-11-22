@@ -875,6 +875,36 @@ derive_effective_keygen_overrides() {
   fi
 }
 
+# Fills keygen_command for the given private key path. The dry-run and
+# "Executing" lines show the final path while --force-overwrite runs against a
+# staging path, so both commands come from here.
+build_keygen_command() {
+  local target="$1"
+
+  keygen_command=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$target")
+  if [[ "$key_type" == "rsa" ]]; then
+    keygen_command+=(-b "$rsa_bits")
+  fi
+  if [[ "$empty_passphrase" -eq 1 ]]; then
+    keygen_command+=(-N "")
+  fi
+  if [[ "$quiet" -eq 1 ]]; then
+    keygen_command+=(-q)
+  fi
+  if [[ "$key_type" == *"-sk" ]]; then
+    keygen_command+=(-O "application=${fido_application}")
+    if [[ "$fido_verify_required" -eq 1 ]]; then
+      keygen_command+=(-O verify-required)
+    fi
+    if [[ "$fido_resident" -eq 1 ]]; then
+      keygen_command+=(-O resident)
+    fi
+  fi
+  if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
+    keygen_command+=("${forwarded_ssh_keygen_args[@]}")
+  fi
+}
+
 create_temp_output_dir() {
   local output_dir="$1"
   local temp_root=""
@@ -909,6 +939,7 @@ extra_ssh_keygen_args=()
 extra_ssh_keygen_args_present=0
 forwarded_ssh_keygen_args=()
 forwarded_ssh_keygen_args_present=0
+keygen_command=()
 
 reset_state_values
 parse_cli "$@"
@@ -1071,28 +1102,8 @@ validate_fido_version_requirements "$effective_key_type" "$effective_verify_requ
 output_dir="$(dirname "$(normalize_path_arg "$output")")"
 managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
 
-display_cmd=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$output")
-if [[ "$key_type" == "rsa" ]]; then
-  display_cmd+=(-b "$rsa_bits")
-fi
-if [[ "$empty_passphrase" -eq 1 ]]; then
-  display_cmd+=(-N "")
-fi
-if [[ "$quiet" -eq 1 ]]; then
-  display_cmd+=(-q)
-fi
-if [[ "$key_type" == *"-sk" ]]; then
-  display_cmd+=(-O "application=${fido_application}")
-  if [[ "$fido_verify_required" -eq 1 ]]; then
-    display_cmd+=(-O verify-required)
-  fi
-  if [[ "$fido_resident" -eq 1 ]]; then
-    display_cmd+=(-O resident)
-  fi
-fi
-if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
-  display_cmd+=("${forwarded_ssh_keygen_args[@]}")
-fi
+build_keygen_command "$output"
+display_cmd=("${keygen_command[@]}")
 
 if [[ "$dry_run" -eq 1 ]]; then
   printf 'profile: %s\n' "$canonical_profile"
@@ -1135,28 +1146,8 @@ if [[ "$force_overwrite" -eq 1 ]]; then
   cmd_output="$temp_output"
 fi
 
-cmd=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$cmd_output")
-if [[ "$key_type" == "rsa" ]]; then
-  cmd+=(-b "$rsa_bits")
-fi
-if [[ "$empty_passphrase" -eq 1 ]]; then
-  cmd+=(-N "")
-fi
-if [[ "$quiet" -eq 1 ]]; then
-  cmd+=(-q)
-fi
-if [[ "$key_type" == *"-sk" ]]; then
-  cmd+=(-O "application=${fido_application}")
-  if [[ "$fido_verify_required" -eq 1 ]]; then
-    cmd+=(-O verify-required)
-  fi
-  if [[ "$fido_resident" -eq 1 ]]; then
-    cmd+=(-O resident)
-  fi
-fi
-if [[ "$forwarded_ssh_keygen_args_present" -eq 1 ]]; then
-  cmd+=("${forwarded_ssh_keygen_args[@]}")
-fi
+build_keygen_command "$cmd_output"
+cmd=("${keygen_command[@]}")
 
 printf 'Executing:'
 printf ' %q' "${display_cmd[@]}"
