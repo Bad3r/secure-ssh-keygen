@@ -922,6 +922,62 @@ EOF
   assert_contains "Output path is not shell-expanded: ~/.ssh/id_work" "$err" "literal tilde passthrough output should be reported"
 }
 
+case_passthrough_option_values_are_not_reparsed() {
+  local tmp home out err rc
+
+  tmp="$(new_tempdir)"
+  home="$tmp/home"
+  mkdir -p "$home"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_wrapper --dry-run -- -N -fsecret -C "-t rsa" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "passthrough option values should be accepted"
+  assert_contains "output: $home/.ssh/id_ed25519" "$out" "a passthrough value starting with -f should not change the output path"
+  assert_contains "-N -fsecret" "$out" "a passthrough value starting with -f should stay attached to its option"
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -qN -fsecret >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a value after clustered passthrough flags should be accepted"
+  assert_contains "output: $home/.ssh/id_ed25519" "$out" "a value after clustered flags should not change the output path"
+  assert_contains "-qN -fsecret" "$out" "a value after clustered flags should stay attached to its option"
+}
+
+case_passthrough_clustered_output_is_honored() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$tmp/keys/id_custom"
+  mkdir -p "$bin" "$home/.ssh" "$tmp/keys"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -qf "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a clustered passthrough -f should be accepted"
+  assert_contains "output: $target" "$out" "a clustered passthrough -f should set the output path"
+  assert_contains " -f $target -q" "$out" "flags clustered ahead of -f should still be forwarded"
+  assert_not_contains "-qf" "$out" "a clustered passthrough -f should not be forwarded a second time"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper -- -qf "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a clustered passthrough -f should get overwrite protection"
+  assert_contains "Refusing to overwrite existing key material at $target" "$err" "a clustered passthrough -f should report the protected path"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a clustered passthrough -f should leave the private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a clustered passthrough -f should leave the public key in place"
+  assert_not_exists "$home/.ssh/id_ed25519" "a clustered passthrough -f should not fall back to the default path"
+}
+
 case_inherited_state_variables_are_ignored() {
   local tmp bin home target out err rc
 
@@ -988,6 +1044,8 @@ run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_
 run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
 run_case "numeric values use base ten" case_numeric_values_use_base_ten
 run_case "output rejects unexpanded shell prefix" case_output_rejects_unexpanded_shell_prefix
+run_case "passthrough option values are not reparsed" case_passthrough_option_values_are_not_reparsed
+run_case "passthrough clustered output is honored" case_passthrough_clustered_output_is_honored
 run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
 
 if [[ "$failures" -gt 0 ]]; then

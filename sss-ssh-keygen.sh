@@ -760,6 +760,14 @@ validate_fido_version_requirements() {
 }
 
 derive_effective_keygen_overrides() {
+  local token=""
+  local rest=""
+  local flags=""
+  local letter=""
+  local value=""
+  local value_attached=0
+  local value_option_seen=0
+
   effective_key_type="$key_type"
   if [[ "$key_type" == *"-sk" && "$fido_verify_required" -eq 1 ]]; then
     effective_verify_required=1
@@ -770,63 +778,87 @@ derive_effective_keygen_overrides() {
   forwarded_ssh_keygen_args=()
   forwarded_ssh_keygen_args_present=0
 
+  # Tokens are read the way ssh-keygen's getopt reads them: flags may be
+  # clustered, and a value-taking option consumes the rest of its token or the
+  # next argument, whatever that looks like. The value-taking letters are those
+  # followed by a colon in ssh-keygen's option string.
   while (($#)); do
-    case "$1" in
-    -f)
-      if (($# < 2)); then
-        append_forwarded_ssh_keygen_args "$1"
-        break
+    token="$1"
+    shift
+
+    if [[ "$token" == "--" ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+      if (($#)); then
+        append_forwarded_ssh_keygen_args "$@"
       fi
-      effective_output="$2"
-      shift 2
-      ;;
-    -f*)
-      effective_output="${1#-f}"
+      break
+    fi
+    if [[ "$token" != -?* || "$token" == --* ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+      continue
+    fi
+
+    rest="${token#-}"
+    flags=""
+    value_option_seen=0
+    while [[ -n "$rest" ]]; do
+      letter="${rest:0:1}"
+      rest="${rest:1}"
+      case "$letter" in
+      [CDEFIMNOPRVYZabfmnrstwz])
+        value_option_seen=1
+        break
+        ;;
+      esac
+      flags="${flags}${letter}"
+    done
+
+    if [[ "$value_option_seen" -ne 1 ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+      continue
+    fi
+
+    if [[ -n "$rest" ]]; then
+      value="$rest"
+      value_attached=1
+    elif (($#)); then
+      value="$1"
+      value_attached=0
       shift
-      ;;
-    -t)
-      if (($# < 2)); then
-        append_forwarded_ssh_keygen_args "$1"
-        break
+    else
+      # ssh-keygen reports the missing value.
+      append_forwarded_ssh_keygen_args "$token"
+      break
+    fi
+
+    case "$letter" in
+    f)
+      # The wrapper passes its own -f, so only flags clustered ahead of this
+      # one are forwarded.
+      effective_output="$value"
+      if [[ -n "$flags" ]]; then
+        append_forwarded_ssh_keygen_args "-$flags"
       fi
-      append_forwarded_ssh_keygen_args "$1" "$2"
-      effective_key_type="$2"
+      continue
+      ;;
+    t)
+      effective_key_type="$value"
       if [[ "$effective_key_type" != *"-sk" ]]; then
         effective_verify_required=0
       fi
-      shift 2
       ;;
-    -t*)
-      append_forwarded_ssh_keygen_args "$1"
-      effective_key_type="${1#-t}"
-      if [[ "$effective_key_type" != *"-sk" ]]; then
-        effective_verify_required=0
-      fi
-      shift
-      ;;
-    -O)
-      if (($# < 2)); then
-        append_forwarded_ssh_keygen_args "$1"
-        break
-      fi
-      append_forwarded_ssh_keygen_args "$1" "$2"
-      if [[ "$2" == "verify-required" ]]; then
+    O)
+      if [[ "$value" == "verify-required" ]]; then
         effective_verify_required=1
       fi
-      shift 2
-      ;;
-    -O*)
-      append_forwarded_ssh_keygen_args "$1"
-      if [[ "${1#-O}" == "verify-required" ]]; then
-        effective_verify_required=1
-      fi
-      shift
-      ;;
-    *)
-      append_forwarded_ssh_keygen_args "$1"
-      shift
       ;;
     esac
+
+    if [[ "$value_attached" -eq 1 ]]; then
+      append_forwarded_ssh_keygen_args "$token"
+    else
+      append_forwarded_ssh_keygen_args "$token" "$value"
+    fi
   done
 
   if [[ "$effective_key_type" != *"-sk" ]]; then
