@@ -764,10 +764,10 @@ validate_fido_version_requirements() {
   local minimum_major=8
   local minimum_minor=2
   local minimum_label="8.2"
-  local effective_key_type="$1"
+  local key_class="$1"
   local effective_verify_required="$2"
 
-  [[ "$effective_key_type" == *"-sk" ]] || return 0
+  [[ "$key_class" == "fido" ]] || return 0
 
   if [[ "$effective_verify_required" -eq 1 ]]; then
     minimum_minor=4
@@ -783,6 +783,20 @@ validate_fido_version_requirements() {
   fi
 }
 
+# Prints rsa, fido, or other for a key type name as ssh-keygen reads it: short
+# names match without regard to case, and the full key type names such as
+# sk-ssh-ed25519@openssh.com are accepted as well.
+key_type_class() {
+  local name=""
+
+  name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$name" in
+  rsa | ssh-rsa | rsa-sha2-*) printf 'rsa' ;;
+  *-sk | sk-* | *-sk-*) printf 'fido' ;;
+  *) printf 'other' ;;
+  esac
+}
+
 derive_effective_keygen_overrides() {
   local token=""
   local rest=""
@@ -792,8 +806,8 @@ derive_effective_keygen_overrides() {
   local value_attached=0
   local value_option_seen=0
   local passthrough_verify_required=0
+  local effective_key_type="$key_type"
 
-  effective_key_type="$key_type"
   passthrough_output=""
   passthrough_output_present=0
   forwarded_ssh_keygen_args=()
@@ -882,8 +896,9 @@ derive_effective_keygen_overrides() {
     fi
   done
 
+  effective_key_class="$(key_type_class "$effective_key_type")"
   effective_verify_required=0
-  if [[ "$effective_key_type" == *"-sk" ]]; then
+  if [[ "$effective_key_class" == "fido" ]]; then
     if [[ "$fido_verify_required" -eq 1 || "$passthrough_verify_required" -eq 1 ]]; then
       effective_verify_required=1
     fi
@@ -901,7 +916,7 @@ build_keygen_command() {
   local target="$1"
 
   keygen_command=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$target")
-  if [[ "$effective_key_type" == "rsa" ]]; then
+  if [[ "$effective_key_class" == "rsa" ]]; then
     keygen_command+=(-b "$rsa_bits")
   fi
   if [[ "$empty_passphrase" -eq 1 ]]; then
@@ -910,7 +925,7 @@ build_keygen_command() {
   if [[ "$quiet" -eq 1 ]]; then
     keygen_command+=(-q)
   fi
-  if [[ "$effective_key_type" == *"-sk" ]]; then
+  if [[ "$effective_key_class" == "fido" ]]; then
     keygen_command+=(-O "application=${fido_application}")
     if [[ "$fido_verify_required" -eq 1 ]]; then
       keygen_command+=(-O verify-required)
@@ -1249,7 +1264,7 @@ else
   derive_effective_keygen_overrides
 fi
 
-if [[ "$effective_key_type" == "rsa" ]]; then
+if [[ "$effective_key_class" == "rsa" ]]; then
   if [[ ! "$rsa_bits" =~ ^[0-9]+$ ]] || ((10#$rsa_bits < 3072)); then
     usage_error "Invalid RSA bit size: $rsa_bits"
   fi
@@ -1281,7 +1296,7 @@ case "$output" in
   ;;
 esac
 
-validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
+validate_fido_version_requirements "$effective_key_class" "$effective_verify_required"
 output_dir="$(dirname "$(normalize_path_arg "$output")")"
 managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
 

@@ -1252,6 +1252,43 @@ case_passthrough_key_type_keeps_wrapper_defaults() {
   rc=$?
   assert_equals "0" "$rc" "a passthrough software key type should be accepted on an RSA profile"
   assert_not_contains " -b " "$out" "a passthrough software key type should not receive an RSA bit size"
+
+  # ssh-keygen matches short names without regard to case and accepts the
+  # full key type names.
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -t ED25519-SK >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an upper-case passthrough FIDO key type should be accepted"
+  assert_contains "-O application=ssh: -O verify-required -t ED25519-SK" "$out" "an upper-case passthrough FIDO key type should keep the FIDO defaults"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
+    run_isolated_wrapper --dry-run -- -t sk-ssh-ed25519@openssh.com >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a full passthrough FIDO key type name should reach the version gate"
+  assert_contains "OpenSSH 8.4 or newer is required" "$err" "a full passthrough FIDO key type name should keep verify-required"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -t sk-ecdsa-sha2-nistp256@openssh.com >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a full passthrough ECDSA FIDO key type name should be accepted"
+  assert_contains "-O application=ssh: -O verify-required -t" "$out" "a full passthrough ECDSA FIDO key type name should keep the FIDO defaults"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="4096" \
+    run_isolated_wrapper --dry-run -- -t RSA >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an upper-case passthrough RSA key type should be accepted"
+  assert_contains "-b 4096 -t RSA" "$out" "an upper-case passthrough RSA key type should keep the configured bit size"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="2048" \
+    run_isolated_wrapper --dry-run -- -t ssh-rsa >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a full passthrough RSA key type name should enforce the RSA minimum"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --profile hardware -- -t ED25519 >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an upper-case passthrough software key type should be accepted on a FIDO profile"
+  assert_not_contains "-O " "$out" "an upper-case passthrough software key type should not receive FIDO options"
 }
 
 case_output_overrides_less_specific_suffix() {
