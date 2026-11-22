@@ -924,9 +924,12 @@ if [[ -n "$output_suffix" ]]; then
     usage_error "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path"
 fi
 
-if [[ ! "$rounds" =~ ^[0-9]+$ ]] || [[ "$rounds" -lt 1 ]]; then
+# Numeric values are forced to base 10: a leading zero would otherwise be read
+# as octal here and as decimal by ssh-keygen.
+if [[ ! "$rounds" =~ ^[0-9]+$ ]] || ((10#$rounds < 1)); then
   usage_error "Invalid rounds value: $rounds"
 fi
+rounds="$((10#$rounds))"
 
 case "$profile" in
 ed25519 | software)
@@ -979,9 +982,10 @@ fips)
 esac
 
 if [[ "$key_type" == "rsa" ]]; then
-  if [[ ! "$rsa_bits" =~ ^[0-9]+$ ]] || [[ "$rsa_bits" -lt 3072 ]]; then
+  if [[ ! "$rsa_bits" =~ ^[0-9]+$ ]] || ((10#$rsa_bits < 3072)); then
     usage_error "Invalid RSA bit size: $rsa_bits"
   fi
+  rsa_bits="$((10#$rsa_bits))"
 fi
 
 case "$fido_application" in

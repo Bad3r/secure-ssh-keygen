@@ -864,6 +864,25 @@ case_explicit_managed_output_repairs_parent_dir() {
   assert_equals "700" "$mode" "explicit managed outputs should still repair ~/.ssh to 700"
 }
 
+case_numeric_values_use_base_ten() {
+  local tmp out err rc
+
+  tmp="$(new_tempdir)"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  run_wrapper --profile fips --rsa-bits 02048 --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "zero-padded rsa bits below the minimum should exit 2"
+  assert_contains "Invalid RSA bit size: 02048" "$err" "zero-padded rsa bits below the minimum should be rejected"
+
+  run_wrapper --profile fips --rsa-bits 04096 --rounds 08 --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "zero-padded numeric values should be accepted as decimal"
+  assert_contains "-b 4096" "$out" "zero-padded rsa bits should be passed on as decimal"
+  assert_contains "-a 8 " "$out" "zero-padded rounds should be passed on as decimal"
+  assert_not_contains "value too great for base" "$err" "zero-padded values should not be read as octal"
+}
 
 case_inherited_state_variables_are_ignored() {
   local tmp bin home target out err rc
@@ -929,6 +948,7 @@ run_case "overwrite rejects private directory targets" case_force_overwrite_reje
 run_case "overwrite rejects public directory targets" case_force_overwrite_rejects_public_directory_target
 run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_fix
 run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
+run_case "numeric values use base ten" case_numeric_values_use_base_ten
 run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
 
 if [[ "$failures" -gt 0 ]]; then
