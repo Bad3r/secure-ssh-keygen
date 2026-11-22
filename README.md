@@ -94,7 +94,9 @@ The shipped defaults are:
 
 The wrapper loads `sss-ssh-keygen.conf` from the directory that holds the
 script by default, and continues with built-in defaults after a warning when
-that file is absent. Use `--config PATH`, `--config=PATH`, or the
+that file is absent. When the script is started through a symbolic link, for
+example one placed in a directory on `PATH`, the directory of the link is
+checked first and then the directory of the script the link points to. Use `--config PATH`, `--config=PATH`, or the
 `SSS_SSH_KEYGEN_CONFIG` environment variable to load an alternate file; the
 older `SSH_KEYGEN_SECURE_CONFIG` variable is still read at lower precedence. An
 alternate file that does not exist is an error. Config files are

@@ -1242,6 +1242,53 @@ EOF
   assert_equals "2" "$rc" "an output path and a suffix in one config file should be rejected"
 }
 
+case_symlinked_script_finds_config() {
+  local tmp real real_physical out err rc
+
+  tmp="$(new_tempdir)"
+  real="$tmp/real"
+  mkdir -p "$real" "$tmp/bin" "$tmp/far" "$tmp/home"
+  cp "$script_path" "$real/sss-ssh-keygen.sh"
+  chmod +x "$real/sss-ssh-keygen.sh"
+  real_physical="$(CDPATH='' cd -P "$real" && pwd -P)"
+  ln -s "../real/sss-ssh-keygen.sh" "$tmp/bin/keygen"
+  ln -s "$tmp/bin/keygen" "$tmp/far/keygen"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a symlinked script without any config should fall back to built-in defaults"
+  assert_contains "warning: Default config file not found: $real_physical/sss-ssh-keygen.conf; continuing" "$err" "a symlinked script should look for the config next to the real script"
+
+  printf 'SSH_KEYGEN_PROFILE=rsa4096\n' >"$real/sss-ssh-keygen.conf"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a symlinked script should load the config next to the real script"
+  assert_contains "profile: rsa4096" "$out" "a symlinked script should apply the config next to the real script"
+  assert_not_contains "Default config file not found" "$err" "a symlinked script should not warn when the real script has a config"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/bin/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a relative symlink should resolve against its own directory"
+  assert_contains "profile: rsa4096" "$out" "a relative symlink should reach the config next to the real script"
+
+  printf 'SSH_KEYGEN_PROFILE=fips\n' >"$tmp/bin/sss-ssh-keygen.conf"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a config next to an intermediate link should be accepted"
+  assert_contains "profile: fips" "$out" "the first config along the link chain should win"
+
+  printf 'SSH_KEYGEN_PROFILE=rsa3072\n' >"$tmp/far/sss-ssh-keygen.conf"
+
+  HOME="$tmp/home" USER="alice" HOSTNAME="host" run_script "$tmp/far/keygen" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a config next to the invoked link should be accepted"
+  assert_contains "profile: rsa3072" "$out" "a config next to the invoked link should win over the ones behind it"
+}
+
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1290,6 +1337,7 @@ run_case "passthrough output bypasses HOME" case_passthrough_output_bypasses_hom
 run_case "passthrough empty output is rejected" case_passthrough_empty_output_is_rejected
 run_case "passthrough key type keeps wrapper defaults" case_passthrough_key_type_keeps_wrapper_defaults
 run_case "output overrides a less specific suffix" case_output_overrides_less_specific_suffix
+run_case "symlinked script finds config" case_symlinked_script_finds_config
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2

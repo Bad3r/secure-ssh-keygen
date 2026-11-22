@@ -97,7 +97,9 @@ Config:
     1. --config / --config=
     2. SSS_SSH_KEYGEN_CONFIG
     3. SSH_KEYGEN_SECURE_CONFIG
-    4. ./sss-ssh-keygen.conf in the script directory
+    4. sss-ssh-keygen.conf next to the script; when the script is started
+       through a symbolic link, next to the link first and then next to the
+       script it points to
 
   Config files are parsed as assignment-only files. Supported variables:
     SSH_KEYGEN_PROFILE
@@ -921,6 +923,46 @@ build_keygen_command() {
   fi
 }
 
+# Prints the default config path for the script at the given path. A script
+# started through symbolic links is followed link by link, and the first
+# directory along the way that holds a config file wins, so a file next to the
+# link takes precedence over the one next to the real script. The chain is
+# walked by hand because readlink -f and realpath are not available on every
+# supported system.
+resolve_default_config_path() {
+  local path="$1"
+  local directory=""
+  local target=""
+  local hops=0
+
+  # The first directory is kept as the caller named it; the directories
+  # behind a link are resolved physically so that ".." in a link target is
+  # read the way the kernel reads it.
+  directory="$(CDPATH='' cd -- "$(dirname "$(normalize_path_arg "$path")")" && pwd)" ||
+    die "Unable to resolve the directory of $path"
+
+  while [[ ! -e "$directory/sss-ssh-keygen.conf" && -L "$path" ]]; do
+    hops=$((hops + 1))
+    [[ "$hops" -le 40 ]] || die "Too many levels of symbolic links: $1"
+
+    target="$(readlink "$(normalize_path_arg "$path")")" ||
+      die "Unable to read symbolic link: $path"
+    case "$target" in
+    /*) path="$target" ;;
+    *)
+      directory="$(CDPATH='' cd -P -- "$(dirname "$(normalize_path_arg "$path")")" && pwd -P)" ||
+        die "Unable to resolve the directory of $path"
+      path="$directory/$target"
+      ;;
+    esac
+
+    directory="$(CDPATH='' cd -P -- "$(dirname "$(normalize_path_arg "$path")")" && pwd -P)" ||
+      die "Unable to resolve the directory of $path"
+  done
+
+  printf '%s' "$directory/sss-ssh-keygen.conf"
+}
+
 create_temp_output_dir() {
   local output_dir="$1"
   local temp_root=""
@@ -939,8 +981,7 @@ cleanup_temp_artifacts() {
   fi
 }
 
-script_dir="$(CDPATH='' cd -- "$(dirname "$(normalize_path_arg "$0")")" && pwd)"
-default_config_path="$script_dir/sss-ssh-keygen.conf"
+default_config_path="$(resolve_default_config_path "$0")"
 config_path="$default_config_path"
 config_path_source="implicit-default"
 if [[ -n "${SSH_KEYGEN_SECURE_CONFIG:-}" ]]; then
