@@ -659,7 +659,7 @@ case_filesystem_utils_stay_portable_without_double_dash() {
   write_bsd_portability_shims "$bin"
   printf 'old-private\n' >"$target"
   printf 'old-public\n' >"${target}.pub"
-  /bin/chmod 755 "$home/.ssh"
+  chmod 755 "$home/.ssh"
   out="$tmp/out"
   err="$tmp/err"
 
