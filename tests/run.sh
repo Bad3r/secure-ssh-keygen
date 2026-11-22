@@ -22,6 +22,7 @@ unset env_name
 
 failures=0
 test_count=0
+failed_test_count=0
 
 test_root="$(mktemp -d)" || exit 1
 [[ -d "$test_root" ]] || exit 1
@@ -219,9 +220,16 @@ run_case() {
   local name="$1"
   shift
 
+  local failures_before="$failures"
+
   test_count=$((test_count + 1))
-  printf 'ok: %s\n' "$name"
   "$@"
+  if [[ "$failures" -eq "$failures_before" ]]; then
+    printf 'ok: %s\n' "$name"
+  else
+    failed_test_count=$((failed_test_count + 1))
+    printf 'not ok: %s\n' "$name"
+  fi
 }
 
 case_no_bash4_assoc_arrays() {
@@ -883,7 +891,7 @@ run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_
 run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
 
 if [[ "$failures" -gt 0 ]]; then
-  printf 'FAILED %s/%s tests\n' "$failures" "$test_count" >&2
+  printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2
   exit 1
 fi
 
