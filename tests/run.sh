@@ -11,25 +11,31 @@ else
   test_bash="bash"
 fi
 
+# Exported wrapper settings would redirect the cases below, including the ones
+# that replace key files, to paths outside the test sandbox.
+while IFS='=' read -r env_name _; do
+  if [[ "$env_name" =~ ^(SSH_KEYGEN|SSS_SSH_KEYGEN)_[A-Za-z0-9_]*$ ]]; then
+    unset "$env_name"
+  fi
+done < <(env)
+unset env_name
+
 failures=0
 test_count=0
 
-cleanup_paths=()
-cleanup_paths_present=0
+test_root="$(mktemp -d)" || exit 1
+[[ -d "$test_root" ]] || exit 1
 
 cleanup() {
-  local path=""
-
-  if [[ "$cleanup_paths_present" -ne 1 ]]; then
-    return 0
-  fi
-
-  for path in "${cleanup_paths[@]}"; do
-    rm -rf -- "$path"
-  done
+  rm -rf -- "$test_root"
 }
 
 trap cleanup EXIT
+
+# Cases that write key files load this empty config instead of the repository
+# default, so a locally edited sss-ssh-keygen.conf cannot redirect their output.
+isolated_config="$test_root/isolated.conf"
+: >"$isolated_config"
 
 record_failure() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -45,6 +51,10 @@ run_script() {
 
 run_wrapper() {
   run_script "$script_path" "$@"
+}
+
+run_isolated_wrapper() {
+  run_wrapper --config "$isolated_config" "$@"
 }
 
 assert_contains() {
@@ -109,11 +119,7 @@ assert_equals() {
 }
 
 new_tempdir() {
-  local dir
-  dir="$(mktemp -d)"
-  cleanup_paths+=("$dir")
-  cleanup_paths_present=1
-  printf '%s' "$dir"
+  mktemp -d "$test_root/case.XXXXXX"
 }
 
 write_stub_binaries() {
@@ -639,14 +645,14 @@ case_filesystem_utils_stay_portable_without_double_dash() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "overwrite path should stay portable without GNU-only -- handling"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "portable overwrite should still replace the private key"
   assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "portable overwrite should still replace the public key"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --output "$custom_target" >"$out" 2>"$err"
+    run_isolated_wrapper --output "$custom_target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "custom output path should stay portable without GNU-only -- handling"
   assert_equals "stub-private" "$(tr -d '\n' <"$custom_target")" "portable mkdir path should create the private key"
@@ -701,7 +707,7 @@ case_force_overwrite_preserves_existing_keys() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_MODE="fail" \
-    run_wrapper --force-overwrite >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "overwrite failures should bubble up"
   assert_equals "old-private" "$(tr -d '\n' <"$target")" "existing private key should be preserved on failure"
@@ -723,7 +729,7 @@ case_force_overwrite_replaces_after_success() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "overwrite success should exit 0"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "private key should be replaced after success"
@@ -745,7 +751,7 @@ case_force_overwrite_honors_passthrough_output() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite -- -f "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite -- -f "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "passthrough -f should participate in overwrite handling"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "passthrough -f target private key should be replaced"
@@ -767,7 +773,7 @@ case_force_overwrite_rejects_private_directory_target() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "directory private targets should be rejected"
   assert_contains "Refusing to overwrite directory target: $target" "$err" "directory private targets should report a clear error"
@@ -788,7 +794,7 @@ case_force_overwrite_rejects_public_directory_target() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --force-overwrite --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "1" "$rc" "directory public targets should be rejected"
   assert_contains "Refusing to overwrite directory target: ${target}.pub" "$err" "directory public targets should report a clear error"
@@ -809,7 +815,7 @@ case_managed_dir_permissions_warn_and_fix() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper >"$out" 2>"$err"
+    run_isolated_wrapper >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "managed dir repair should still succeed"
   assert_contains "Correcting permissions on $home/.ssh to 700" "$err" "managed dir repair should warn"
@@ -831,7 +837,7 @@ case_explicit_managed_output_repairs_parent_dir() {
   err="$tmp/err"
 
   PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
-    run_wrapper --output "$target" >"$out" 2>"$err"
+    run_isolated_wrapper --output "$target" >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "explicit outputs under ~/.ssh should still succeed"
   assert_contains "Correcting permissions on $home/.ssh to 700" "$err" "explicit managed outputs should still repair ~/.ssh"
