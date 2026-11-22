@@ -237,7 +237,18 @@ case_no_bash4_assoc_arrays() {
 }
 
 case_no_gnu_only_double_dash_for_path_utils() {
-  assert_no_match '\\b(chmod|mkdir|mv|rmdir|dirname|basename|stat)\\b[^[:cntrl:]]* -- ' \
+  local tmp sample
+  local pattern='(^|[^[:alnum:]_])(chmod|mkdir|mv|rmdir|dirname|basename|stat)[^[:alnum:]_][^[:cntrl:]]* -- '
+
+  tmp="$(new_tempdir)"
+  sample="$tmp/sample.sh"
+  printf '  mkdir -p -- dir\n' >"$sample"
+
+  if ! grep -Eq "$pattern" "$sample"; then
+    record_failure "double-dash pattern should match a known GNU-only invocation"
+  fi
+
+  assert_no_match "$pattern" \
     "$script_path" \
     "wrapper should avoid GNU-only double-dash usage in path utilities"
 }
