@@ -1056,6 +1056,26 @@ case_force_overwrite_requires_both_key_files() {
   leftover="$(find "$home/.ssh" -name '.sss-ssh-keygen.*')"
   assert_equals "" "$leftover" "an incomplete key pair should not leave temporary key material behind"
 }
+
+case_managed_dir_special_bits_do_not_warn() {
+  local tmp bin home out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  chmod 2700 "$home/.ssh" 2>/dev/null || chmod 700 "$home/.ssh"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a setgid 700 managed dir should still succeed"
+  assert_not_contains "Correcting permissions" "$err" "a setgid 700 managed dir should not be reported as needing repair"
+}
+
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1099,6 +1119,7 @@ run_case "passthrough clustered output is honored" case_passthrough_clustered_ou
 run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
 run_case "dangling symlink output is refused" case_dangling_symlink_output_is_refused
 run_case "overwrite requires both key files" case_force_overwrite_requires_both_key_files
+run_case "managed dir special bits do not warn" case_managed_dir_special_bits_do_not_warn
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2

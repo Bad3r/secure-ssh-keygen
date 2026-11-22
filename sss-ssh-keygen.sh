@@ -633,10 +633,15 @@ repair_managed_dir_permissions() {
   mode="$(stat_mode "$directory")" ||
     die "Unable to determine permissions for $directory"
 
-  if [[ "$mode" != "700" ]]; then
+  # GNU stat reports setuid, setgid, and sticky bits as a fourth digit, and
+  # chmod 700 leaves them in place on directories.
+  case "$mode" in
+  700 | [0-7]700) ;;
+  *)
     warn "Correcting permissions on $directory to 700"
     chmod 700 "$(normalize_path_arg "$directory")"
-  fi
+    ;;
+  esac
 }
 
 validate_output_suffix() {
