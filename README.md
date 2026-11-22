@@ -160,7 +160,8 @@ comment without replacing it entirely. Use `--comment` for a full override.
   machine accounts or non-interactive workflows that require it.
 - Existing output paths are protected by default, including dangling symlinks
   that `ssh-keygen` would otherwise write through. Use `--force-overwrite` only
-  when replacement is intentional.
+  when replacement is intentional; it replaces the old pair only after
+  `ssh-keygen` has produced both new key files.
 - The wrapper uses the OpenSSH private-key format and explicitly sets
   `aes256-ctr` for private-key encryption, matching current `ssh-keygen`
   defaults.

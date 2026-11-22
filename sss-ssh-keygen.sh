@@ -1153,9 +1153,17 @@ printf '\n'
 "${cmd[@]}"
 
 if [[ "$force_overwrite" -eq 1 ]]; then
-  mv -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "$output")"
-  mv -f "$(normalize_path_arg "${temp_output}.pub")" "$(normalize_path_arg "${output}.pub")"
+  [[ -f "$temp_output" && -f "${temp_output}.pub" ]] ||
+    die "ssh-keygen did not produce both key files; existing key material at $output was left untouched"
+  mv -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "$output")" ||
+    die "Failed to replace $output; existing key material was left untouched"
+  mv -f "$(normalize_path_arg "${temp_output}.pub")" "$(normalize_path_arg "${output}.pub")" ||
+    die "Replaced $output but not ${output}.pub; regenerate the public key with: ssh-keygen -y -f $output"
   temp_output=""
   rmdir "$(normalize_path_arg "$temp_dir")"
   temp_dir=""
+  # ssh-keygen reported the temporary path it wrote to.
+  if [[ "$quiet" -ne 1 ]]; then
+    printf 'Replaced key material at %s and %s.pub\n' "$output" "$output"
+  fi
 fi

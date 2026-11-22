@@ -167,6 +167,9 @@ success)
   printf '%s\n' "${SSS_TEST_PRIVATE_CONTENT:-stub-private}" >"$output"
   printf '%s\n' "${SSS_TEST_PUBLIC_CONTENT:-stub-public}" >"${output}.pub"
   ;;
+private-only)
+  printf '%s\n' "${SSS_TEST_PRIVATE_CONTENT:-stub-private}" >"$output"
+  ;;
 fail)
   printf 'stub ssh-keygen failure\n' >&2
   exit 1
@@ -753,6 +756,7 @@ case_force_overwrite_replaces_after_success() {
   assert_equals "0" "$rc" "overwrite success should exit 0"
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "private key should be replaced after success"
   assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "public key should be replaced after success"
+  assert_contains "Replaced key material at $target and ${target}.pub" "$out" "overwrite success should report the final key paths"
 }
 
 case_force_overwrite_honors_passthrough_output() {
@@ -1027,6 +1031,31 @@ case_dangling_symlink_output_is_refused() {
   assert_contains "Refusing to overwrite existing key material at $target" "$err" "dangling symlink targets should report a clear error"
   assert_not_exists "$tmp/elsewhere" "a private key should not be written through a dangling symlink"
 }
+
+case_force_overwrite_requires_both_key_files() {
+  local tmp bin home target out err rc leftover
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_MODE="private-only" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "an incomplete key pair should fail the overwrite"
+  assert_contains "ssh-keygen did not produce both key files" "$err" "an incomplete key pair should report a clear error"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an incomplete key pair should leave the private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an incomplete key pair should leave the public key in place"
+  leftover="$(find "$home/.ssh" -name '.sss-ssh-keygen.*')"
+  assert_equals "" "$leftover" "an incomplete key pair should not leave temporary key material behind"
+}
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1069,6 +1098,7 @@ run_case "passthrough option values are not reparsed" case_passthrough_option_va
 run_case "passthrough clustered output is honored" case_passthrough_clustered_output_is_honored
 run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
 run_case "dangling symlink output is refused" case_dangling_symlink_output_is_refused
+run_case "overwrite requires both key files" case_force_overwrite_requires_both_key_files
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2
