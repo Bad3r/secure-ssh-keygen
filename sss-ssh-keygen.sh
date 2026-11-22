@@ -772,13 +772,9 @@ derive_effective_keygen_overrides() {
   local value=""
   local value_attached=0
   local value_option_seen=0
+  local passthrough_verify_required=0
 
   effective_key_type="$key_type"
-  if [[ "$key_type" == *"-sk" && "$fido_verify_required" -eq 1 ]]; then
-    effective_verify_required=1
-  else
-    effective_verify_required=0
-  fi
   passthrough_output=""
   passthrough_output_present=0
   forwarded_ssh_keygen_args=()
@@ -852,13 +848,10 @@ derive_effective_keygen_overrides() {
       ;;
     t)
       effective_key_type="$value"
-      if [[ "$effective_key_type" != *"-sk" ]]; then
-        effective_verify_required=0
-      fi
       ;;
     O)
       if [[ "$value" == "verify-required" ]]; then
-        effective_verify_required=1
+        passthrough_verify_required=1
       fi
       ;;
     esac
@@ -870,19 +863,26 @@ derive_effective_keygen_overrides() {
     fi
   done
 
-  if [[ "$effective_key_type" != *"-sk" ]]; then
-    effective_verify_required=0
+  effective_verify_required=0
+  if [[ "$effective_key_type" == *"-sk" ]]; then
+    if [[ "$fido_verify_required" -eq 1 || "$passthrough_verify_required" -eq 1 ]]; then
+      effective_verify_required=1
+    fi
   fi
 }
 
 # Fills keygen_command for the given private key path. The dry-run and
 # "Executing" lines show the final path while --force-overwrite runs against a
 # staging path, so both commands come from here.
+#
+# Type-specific defaults follow the effective key type: a passthrough -t wins
+# over the profile's -t inside ssh-keygen, and the key it selects must not
+# lose the RSA size or the FIDO options the wrapper would give that type.
 build_keygen_command() {
   local target="$1"
 
   keygen_command=(ssh-keygen -o -t "$key_type" -a "$rounds" -Z "$cipher" -C "$comment" -f "$target")
-  if [[ "$key_type" == "rsa" ]]; then
+  if [[ "$effective_key_type" == "rsa" ]]; then
     keygen_command+=(-b "$rsa_bits")
   fi
   if [[ "$empty_passphrase" -eq 1 ]]; then
@@ -891,7 +891,7 @@ build_keygen_command() {
   if [[ "$quiet" -eq 1 ]]; then
     keygen_command+=(-q)
   fi
-  if [[ "$key_type" == *"-sk" ]]; then
+  if [[ "$effective_key_type" == *"-sk" ]]; then
     keygen_command+=(-O "application=${fido_application}")
     if [[ "$fido_verify_required" -eq 1 ]]; then
       keygen_command+=(-O verify-required)
@@ -1053,13 +1053,6 @@ fips)
   ;;
 esac
 
-if [[ "$key_type" == "rsa" ]]; then
-  if [[ ! "$rsa_bits" =~ ^[0-9]+$ ]] || ((10#$rsa_bits < 3072)); then
-    usage_error "Invalid RSA bit size: $rsa_bits"
-  fi
-  rsa_bits="$((10#$rsa_bits))"
-fi
-
 case "$fido_application" in
 ssh:*) ;;
 *)
@@ -1071,6 +1064,13 @@ if [[ "$extra_ssh_keygen_args_present" -eq 1 ]]; then
   derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
 else
   derive_effective_keygen_overrides
+fi
+
+if [[ "$effective_key_type" == "rsa" ]]; then
+  if [[ ! "$rsa_bits" =~ ^[0-9]+$ ]] || ((10#$rsa_bits < 3072)); then
+    usage_error "Invalid RSA bit size: $rsa_bits"
+  fi
+  rsa_bits="$((10#$rsa_bits))"
 fi
 
 # A passthrough -f is settled first so that the default directory, and with it

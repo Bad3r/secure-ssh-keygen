@@ -173,7 +173,12 @@ comment without replacing it entirely. Use `--comment` for a full override.
   `16`; this project raises the cost as a practical baseline for current
   workstations.
 - Extra arguments after `--` are an expert escape hatch. They are forwarded as
-  given and can override wrapper-managed `ssh-keygen` options.
+  given and can override wrapper-managed `ssh-keygen` options. The wrapper
+  interprets two of them: `-f PATH` replaces the output path and receives the
+  same overwrite protection, and `-t TYPE` selects which type-specific defaults
+  apply. An RSA type keeps the configured bit size, and a FIDO type keeps the
+  application, `verify-required`, and resident settings. Use
+  `--no-fido-verify-required` to create a FIDO key without `verify-required`.
 - Resident keys are not the default. Enable them explicitly with
   `--fido-resident` if portability across hosts is worth the theft tradeoff for
   your use case.

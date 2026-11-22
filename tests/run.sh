@@ -1122,6 +1122,66 @@ case_passthrough_empty_output_is_rejected() {
   assert_not_exists "$tmp/keygen.log" "an empty clustered passthrough -f should not reach ssh-keygen"
 }
 
+case_passthrough_key_type_keeps_wrapper_defaults() {
+  local tmp bin home out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  mkdir -p "$bin" "$home"
+  write_stub_binaries "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -t ed25519-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough FIDO key type should be accepted"
+  assert_contains "-O application=ssh: -O verify-required -t ed25519-sk" "$out" "a passthrough FIDO key type should keep the FIDO defaults"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --no-fido-verify-required --fido-resident -- -t ecdsa-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "wrapper FIDO flags should apply to a passthrough FIDO key type"
+  assert_contains "-O application=ssh: -O resident -t ecdsa-sk" "$out" "wrapper FIDO flags should shape a passthrough FIDO key"
+  assert_not_contains "verify-required" "$out" "--no-fido-verify-required should still apply to a passthrough FIDO key type"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
+    run_isolated_wrapper --dry-run -- -t ed25519-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "the default verify-required should gate a passthrough FIDO key type on OpenSSH 8.3"
+  assert_contains "OpenSSH 8.4 or newer is required" "$err" "the verify-required floor should cover a passthrough FIDO key type"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_VERSION="OpenSSH_8.3p1, OpenSSL test" \
+    run_isolated_wrapper --dry-run -- -O verify-required -t rsa -t ed25519-sk >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a passthrough verify-required should survive an intermediate -t"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --profile hardware -- -t ed25519 >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough software key type should be accepted on a FIDO profile"
+  assert_not_contains "-O " "$out" "a passthrough software key type should not receive FIDO options"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="4096" \
+    run_isolated_wrapper --dry-run -- -t rsa >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough RSA key type should be accepted"
+  assert_contains "-b 4096 -t rsa" "$out" "a passthrough RSA key type should keep the configured bit size"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSH_KEYGEN_RSA_BITS="2048" \
+    run_isolated_wrapper --dry-run -- -t rsa >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "a passthrough RSA key type should enforce the RSA minimum"
+  assert_contains "Invalid RSA bit size: 2048" "$err" "a passthrough RSA key type should report a weak bit size"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run --profile fips -- -t ed25519 >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough software key type should be accepted on an RSA profile"
+  assert_not_contains " -b " "$out" "a passthrough software key type should not receive an RSA bit size"
+}
+
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1168,6 +1228,7 @@ run_case "overwrite requires both key files" case_force_overwrite_requires_both_
 run_case "managed dir special bits do not warn" case_managed_dir_special_bits_do_not_warn
 run_case "passthrough output bypasses HOME" case_passthrough_output_bypasses_home
 run_case "passthrough empty output is rejected" case_passthrough_empty_output_is_rejected
+run_case "passthrough key type keeps wrapper defaults" case_passthrough_key_type_keeps_wrapper_defaults
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2
