@@ -220,15 +220,19 @@ write_bsd_portability_shims() {
 }
 
 # Shims that fail or interrupt chosen steps of the --force-overwrite swap.
-# SSS_TEST_MV_FAIL and SSS_TEST_MV_TERM_AFTER take a list of steps:
-# install-private, install-public, or restore.
+# SSS_TEST_MV_FAIL, SSS_TEST_MV_TERM_BEFORE, and SSS_TEST_MV_TERM_AFTER take a
+# list of steps: install-private, install-public, or restore. TERM_BEFORE
+# signals the wrapper and then holds the rename back, so the rename is still
+# pending when the signal arrives. SSS_TEST_RM_DELAY slows every rm by that
+# many seconds, which keeps a cleanup busy while a pending rename lands.
 write_swap_fault_shims() {
   local bin_dir="$1"
-  local real_mv real_ln real_cp
+  local real_mv real_ln real_cp real_rm
 
   real_mv="$(command -v mv)"
   real_ln="$(command -v ln)"
   real_cp="$(command -v cp)"
+  real_rm="$(command -v rm)"
 
   cat >"$bin_dir/mv" <<EOF
 #!/bin/sh
@@ -254,6 +258,13 @@ case " \${SSS_TEST_MV_FAIL:-} " in
 *" \$step "*)
   printf 'stub mv failure: %s\n' "\$step" >&2
   exit 1
+  ;;
+esac
+
+case " \${SSS_TEST_MV_TERM_BEFORE:-} " in
+*" \$step "*)
+  kill -TERM "\$PPID"
+  sleep 1
   ;;
 esac
 
@@ -283,7 +294,15 @@ fi
 exec "$real_cp" "\$@"
 EOF
 
-  chmod +x "$bin_dir/mv" "$bin_dir/ln" "$bin_dir/cp"
+  cat >"$bin_dir/rm" <<EOF
+#!/bin/sh
+if [ -n "\${SSS_TEST_RM_DELAY:-}" ]; then
+  sleep "\$SSS_TEST_RM_DELAY"
+fi
+exec "$real_rm" "\$@"
+EOF
+
+  chmod +x "$bin_dir/mv" "$bin_dir/ln" "$bin_dir/cp" "$bin_dir/rm"
 }
 
 staging_leftovers() {
@@ -1479,7 +1498,7 @@ case_force_overwrite_keeps_material_when_rollback_fails() {
 
   staging="$(staging_leftovers "$home/.ssh")"
   saved="$(find "$home/.ssh" -path '*/previous.*/private')"
-  assert_contains "Previous files that were replaced are kept in $staging/previous." "$err" "a failed rollback should name the directory with the previous files"
+  assert_contains "The previous files are kept in $staging/previous." "$err" "a failed rollback should name the directory with the previous files"
   assert_contains "New files that were not installed are kept in $staging" "$err" "a failed rollback should name the directory with the new files"
   if [[ -f "$saved" ]]; then
     assert_equals "old-private" "$(tr -d '\n' <"$saved")" "a failed rollback should keep the previous private key"
@@ -1574,8 +1593,8 @@ case_force_overwrite_rollback_without_hard_links() {
   assert_equals "" "$(staging_leftovers "$home/.ssh")" "a copied backup should be removed after a successful overwrite"
 }
 
-case_force_overwrite_restores_when_interrupted() {
-  local tmp bin home target out err rc
+case_force_overwrite_keeps_material_when_interrupted() {
+  local tmp bin home target out err rc staging saved
 
   tmp="$(new_tempdir)"
   bin="$tmp/bin"
@@ -1584,11 +1603,10 @@ case_force_overwrite_restores_when_interrupted() {
   mkdir -p "$bin" "$home/.ssh"
   write_stub_binaries "$bin"
   write_swap_fault_shims "$bin"
-  out="$tmp/out"
-  err="$tmp/err"
-
   printf 'old-private\n' >"$target"
   printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
 
   # The subshell keeps the shell's "Terminated" notice out of the test output.
   (
@@ -1597,19 +1615,44 @@ case_force_overwrite_restores_when_interrupted() {
   ) 2>/dev/null
   rc=$?
   assert_equals "143" "$rc" "a wrapper terminated between the renames should die from the signal"
-  assert_contains "Interrupted while replacing the key material at $target; the previous state was restored" "$err" "an interrupted overwrite should report the rollback"
-  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an overwrite interrupted between the renames should restore the private key"
-  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an overwrite interrupted between the renames should keep the public key"
-  assert_equals "" "$(staging_leftovers "$home/.ssh")" "an interrupted overwrite should not leave staging files behind"
+  assert_contains "The replacement of the key material at $target was cut short" "$err" "an interrupted overwrite should be reported"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an interrupted overwrite should leave the public key that was not replaced"
+
+  staging="$(staging_leftovers "$home/.ssh")"
+  saved="$(find "$home/.ssh" -path '*/previous.*/private')"
+  assert_contains "The previous files are kept in $staging/previous." "$err" "an interrupted overwrite should name the directory with the previous files"
+  if [[ -f "$saved" ]]; then
+    assert_equals "old-private" "$(tr -d '\n' <"$saved")" "an interrupted overwrite should keep the previous private key"
+  else
+    record_failure "an interrupted overwrite should keep the previous private key on disk"
+  fi
+  if [[ -f "$staging/id_ed25519.pub" ]]; then
+    assert_equals "stub-public" "$(tr -d '\n' <"$staging/id_ed25519.pub")" "an interrupted overwrite should keep the new public key"
+  else
+    record_failure "an interrupted overwrite should keep the new public key on disk"
+  fi
+
+  # Bash runs the exit trap without waiting for a rename that is still
+  # pending. A cleanup that deleted the saved files at that point would lose
+  # the previous private key once the rename lands; the slow rm gives the
+  # rename time to do so.
+  rm -rf "$home/.ssh"
+  mkdir -p "$home/.ssh"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
 
   (
-    PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_TERM_AFTER="install-public" \
+    PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_TERM_BEFORE="install-private" SSS_TEST_RM_DELAY="2" \
       run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
   ) 2>/dev/null
   rc=$?
-  assert_equals "143" "$rc" "a wrapper terminated after the second rename should die from the signal"
-  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an overwrite interrupted before it finished should restore the private key"
-  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an overwrite interrupted before it finished should restore the public key"
+  assert_equals "143" "$rc" "a wrapper terminated during a rename should die from the signal"
+  saved="$(find "$home/.ssh" -path '*/previous.*/private')"
+  if [[ -f "$saved" ]]; then
+    assert_equals "old-private" "$(tr -d '\n' <"$saved")" "a rename that outlives the wrapper should not cost the previous private key"
+  else
+    record_failure "a rename that outlives the wrapper should leave the previous private key on disk"
+  fi
 }
 
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
@@ -1665,7 +1708,7 @@ run_case "overwrite restores after a failed rename" case_force_overwrite_restore
 run_case "overwrite keeps material when rollback fails" case_force_overwrite_keeps_material_when_rollback_fails
 run_case "overwrite handles symlink targets" case_force_overwrite_handles_symlink_targets
 run_case "overwrite rollback without hard links" case_force_overwrite_rollback_without_hard_links
-run_case "overwrite restores when interrupted" case_force_overwrite_restores_when_interrupted
+run_case "overwrite keeps material when interrupted" case_force_overwrite_keeps_material_when_interrupted
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2

@@ -1040,11 +1040,13 @@ restore_previous_key_material() {
   return "$status"
 }
 
-report_unrestored_key_material() {
+# Leaves the staging directory alone and says what it holds. Used whenever
+# the wrapper cannot vouch for the state of the key files.
+report_kept_key_material() {
   replace_state="kept"
 
-  printf 'error: %s\n' "Failed to replace the key material at $output, and the previous files could not be restored" >&2
-  printf 'error: %s\n' "Previous files that were replaced are kept in $saved_dir" >&2
+  printf 'error: %s\n' "$1" >&2
+  printf 'error: %s\n' "The previous files are kept in $saved_dir" >&2
   printf 'error: %s\n' "New files that were not installed are kept in $temp_dir" >&2
   printf 'error: %s\n' "If $output holds the new private key, its public key can be rebuilt with: ssh-keygen -y -f $output" >&2
 }
@@ -1082,21 +1084,19 @@ replace_key_material() {
     die "Failed to replace the key material at $output; the previous state was restored and the new key pair was discarded"
   fi
 
-  report_unrestored_key_material
+  report_kept_key_material "Failed to replace the key material at $output, and the previous files could not be restored"
   exit 1
 }
 
 cleanup_temp_artifacts() {
+  # A signal ended the wrapper inside the swap. Bash runs this trap without
+  # waiting for a rename that is still in flight, so nothing is restored or
+  # deleted here: the staging directory keeps every file that was replaced.
   if [[ "${replace_state:-idle}" == "swapping" ]]; then
-    if restore_previous_key_material; then
-      replace_state="idle"
-      warn "Interrupted while replacing the key material at $output; the previous state was restored and the new key pair was discarded"
-    else
-      report_unrestored_key_material
-    fi
+    report_kept_key_material "The replacement of the key material at $output was cut short"
   fi
 
-  # After a failed rollback the staging directory holds the only copies.
+  # The staging directory may hold the only copies.
   if [[ "${replace_state:-idle}" == "kept" ]]; then
     return 0
   fi

@@ -173,13 +173,13 @@ comment without replacing it entirely. Use `--comment` for a full override.
   replaced itself; the file it points to is left alone.
 - `--force-overwrite` generates the new pair in a `.sss-ssh-keygen.*` staging
   directory next to the output and replaces the old pair only after
-  `ssh-keygen` has produced both files. If a rename fails or the wrapper is
-  interrupted, the previous files are put back and the new pair is discarded.
-  The two renames remain separate steps: a wrapper that is killed outright
-  between them, for example by `SIGKILL` or a power loss, can leave the new
-  private key next to the old public key. The previous private key and the new
-  public key are then still in the staging directory, and
-  `ssh-keygen -y -f PATH` rebuilds a public key from the private key in place.
+  `ssh-keygen` has produced both files. If a rename fails, the previous files
+  are put back and the new pair is discarded. The two renames remain separate
+  steps: a wrapper that is interrupted or killed between them can leave the new
+  private key next to the old public key. Nothing is deleted in that case. The
+  previous private key and the new public key stay in the staging directory,
+  and `ssh-keygen -y -f PATH` rebuilds a public key from the private key in
+  place.
 - The wrapper uses the OpenSSH private-key format and explicitly sets
   `aes256-ctr` for private-key encryption, matching current `ssh-keygen`
   defaults.
