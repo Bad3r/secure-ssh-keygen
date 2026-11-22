@@ -864,6 +864,35 @@ case_explicit_managed_output_repairs_parent_dir() {
   assert_equals "700" "$mode" "explicit managed outputs should still repair ~/.ssh to 700"
 }
 
+
+case_inherited_state_variables_are_ignored() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$home" USER="alice" HOSTNAME="host" cli_set_profile=1 cli_value_profile=rsa4096 \
+    run_wrapper --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "inherited state variables should not break a dry run"
+  assert_contains "profile: ed25519" "$out" "inherited state variables should not select a profile"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    cli_set_force_overwrite=1 cli_value_force_overwrite=1 \
+    run_isolated_wrapper >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "inherited state variables should not enable overwrite"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "inherited state variables should not replace the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "inherited state variables should not replace the public key"
+}
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -900,6 +929,7 @@ run_case "overwrite rejects private directory targets" case_force_overwrite_reje
 run_case "overwrite rejects public directory targets" case_force_overwrite_rejects_public_directory_target
 run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_fix
 run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
+run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2

@@ -195,6 +195,19 @@ set_config_value() {
   set_state_value "config" "$1" "$2"
 }
 
+# State lives in plain globals, so same-named variables inherited from the
+# environment would otherwise read as values set by the CLI, config, or env layer.
+reset_state_values() {
+  local namespace=""
+  local field=""
+
+  for namespace in cli config env; do
+    for field in config_path "${MERGE_FIELDS[@]}"; do
+      unset "${namespace}_value_${field}" "${namespace}_set_${field}"
+    done
+  done
+}
+
 valid_profiles_csv="$(join_profiles)"
 
 parse_config_value() {
@@ -856,6 +869,7 @@ extra_ssh_keygen_args_present=0
 forwarded_ssh_keygen_args=()
 forwarded_ssh_keygen_args_present=0
 
+reset_state_values
 parse_cli "$@"
 if state_is_set "cli" "config_path"; then
   config_path="$(state_value "cli" "config_path")"
