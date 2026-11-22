@@ -89,7 +89,8 @@ Options:
   --no-fido-verify-required    omit -O verify-required for FIDO profiles
   --dry-run                    print the command and exit
   --quiet                      add -q
-  --force-overwrite            atomically replace existing key material
+  --force-overwrite            replace existing key material, restoring it if
+                               the swap fails
   --help                       show this help
 
 Config:
@@ -971,9 +972,127 @@ create_temp_output_dir() {
   mktemp -d "$temp_root/.sss-ssh-keygen.XXXXXX"
 }
 
+# Saves an existing key file under the staging directory without touching the
+# original. A hard link keeps the old file reachable after its name has been
+# renamed over, a symbolic link is recreated, and a copy covers filesystems
+# without hard links.
+save_previous_key_file() {
+  local source="$1"
+  local destination="$2"
+  local link_target=""
+
+  if [[ -L "$source" ]]; then
+    link_target="$(readlink "$(normalize_path_arg "$source")")" || return 1
+    ln -s "$(normalize_path_arg "$link_target")" "$(normalize_path_arg "$destination")"
+    return
+  fi
+
+  # A refused hard link is expected on some filesystems; the copy below
+  # reports its own error if it fails too.
+  if ln "$(normalize_path_arg "$source")" "$(normalize_path_arg "$destination")" 2>/dev/null; then
+    return 0
+  fi
+
+  [[ -f "$source" ]] || return 1
+  cp -p "$(normalize_path_arg "$source")" "$(normalize_path_arg "$destination")"
+}
+
+# Undoes one rename of the swap. A staged file that is still in the staging
+# directory was never renamed into place; rename is atomic, so this also
+# holds when the wrapper was interrupted in the middle of one.
+restore_previous_key_file() {
+  local staged="$1"
+  local installed="$2"
+  local saved="$3"
+
+  if [[ -e "$staged" || -L "$staged" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$saved" ]]; then
+    mv -f "$(normalize_path_arg "$saved")" "$(normalize_path_arg "$installed")"
+  else
+    mv -f "$(normalize_path_arg "$installed")" "$(normalize_path_arg "$staged")"
+  fi
+}
+
+restore_previous_key_material() {
+  local status=0
+
+  restore_previous_key_file "${temp_output}.pub" "${output}.pub" "$saved_public" || status=1
+  restore_previous_key_file "$temp_output" "$output" "$saved_private" || status=1
+
+  return "$status"
+}
+
+report_unrestored_key_material() {
+  replace_state="kept"
+
+  printf 'error: %s\n' "Failed to replace the key material at $output, and the previous files could not be restored" >&2
+  printf 'error: %s\n' "Previous files that were replaced are kept in $saved_dir" >&2
+  printf 'error: %s\n' "New files that were not installed are kept in $temp_dir" >&2
+  printf 'error: %s\n' "If $output holds the new private key, its public key can be rebuilt with: ssh-keygen -y -f $output" >&2
+}
+
+# Two files cannot be renamed in one atomic step, so the swap is made
+# recoverable instead: the previous files stay reachable until both renames
+# are done, and a failed or interrupted swap puts them back.
+replace_key_material() {
+  [[ -f "$temp_output" && -f "${temp_output}.pub" ]] ||
+    die "ssh-keygen did not produce both key files; existing key material at $output was left untouched"
+
+  saved_dir="$(mktemp -d "$(normalize_path_arg "$temp_dir")/previous.XXXXXX")" ||
+    die "Unable to create a rollback directory; existing key material at $output was left untouched"
+
+  if [[ -e "$output" || -L "$output" ]]; then
+    save_previous_key_file "$output" "$saved_dir/private" ||
+      die "Unable to save $output for rollback; existing key material was left untouched"
+    saved_private="$saved_dir/private"
+  fi
+  if [[ -e "${output}.pub" || -L "${output}.pub" ]]; then
+    save_previous_key_file "${output}.pub" "$saved_dir/public" ||
+      die "Unable to save ${output}.pub for rollback; existing key material was left untouched"
+    saved_public="$saved_dir/public"
+  fi
+
+  replace_state="swapping"
+  if mv -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "$output")" &&
+    mv -f "$(normalize_path_arg "${temp_output}.pub")" "$(normalize_path_arg "${output}.pub")"; then
+    replace_state="idle"
+    return 0
+  fi
+
+  if restore_previous_key_material; then
+    replace_state="idle"
+    die "Failed to replace the key material at $output; the previous state was restored and the new key pair was discarded"
+  fi
+
+  report_unrestored_key_material
+  exit 1
+}
+
 cleanup_temp_artifacts() {
+  if [[ "${replace_state:-idle}" == "swapping" ]]; then
+    if restore_previous_key_material; then
+      replace_state="idle"
+      warn "Interrupted while replacing the key material at $output; the previous state was restored and the new key pair was discarded"
+    else
+      report_unrestored_key_material
+    fi
+  fi
+
+  # After a failed rollback the staging directory holds the only copies.
+  if [[ "${replace_state:-idle}" == "kept" ]]; then
+    return 0
+  fi
+
   if [[ -n "${temp_output:-}" ]]; then
     rm -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "${temp_output}.pub")"
+  fi
+
+  if [[ -n "${saved_dir:-}" ]]; then
+    rm -f "$(normalize_path_arg "$saved_dir/private")" "$(normalize_path_arg "$saved_dir/public")"
+    rmdir "$(normalize_path_arg "$saved_dir")" 2>/dev/null || true
   fi
 
   if [[ -n "${temp_dir:-}" ]]; then
@@ -1201,6 +1320,10 @@ fi
 
 temp_dir=""
 temp_output=""
+saved_dir=""
+saved_private=""
+saved_public=""
+replace_state="idle"
 cmd_output="$output"
 trap cleanup_temp_artifacts EXIT
 
@@ -1220,16 +1343,8 @@ printf '\n'
 "${cmd[@]}"
 
 if [[ "$force_overwrite" -eq 1 ]]; then
-  [[ -f "$temp_output" && -f "${temp_output}.pub" ]] ||
-    die "ssh-keygen did not produce both key files; existing key material at $output was left untouched"
-  mv -f "$(normalize_path_arg "$temp_output")" "$(normalize_path_arg "$output")" ||
-    die "Failed to replace $output; existing key material was left untouched"
-  mv -f "$(normalize_path_arg "${temp_output}.pub")" "$(normalize_path_arg "${output}.pub")" ||
-    die "Replaced $output but not ${output}.pub; regenerate the public key with: ssh-keygen -y -f $output"
-  temp_output=""
-  rmdir "$(normalize_path_arg "$temp_dir")"
-  temp_dir=""
-  # ssh-keygen reported the temporary path it wrote to.
+  replace_key_material
+  # ssh-keygen reported the staging path it wrote to.
   if [[ "$quiet" -ne 1 ]]; then
     printf 'Replaced key material at %s and %s.pub\n' "$output" "$output"
   fi

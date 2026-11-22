@@ -219,6 +219,77 @@ write_bsd_portability_shims() {
   write_no_double_dash_shim "$bin_dir" "rmdir" "$(command -v rmdir)" "$original_path"
 }
 
+# Shims that fail or interrupt chosen steps of the --force-overwrite swap.
+# SSS_TEST_MV_FAIL and SSS_TEST_MV_TERM_AFTER take a list of steps:
+# install-private, install-public, or restore.
+write_swap_fault_shims() {
+  local bin_dir="$1"
+  local real_mv real_ln real_cp
+
+  real_mv="$(command -v mv)"
+  real_ln="$(command -v ln)"
+  real_cp="$(command -v cp)"
+
+  cat >"$bin_dir/mv" <<EOF
+#!/bin/sh
+source_path=""
+target_path=""
+for arg in "\$@"; do
+  source_path="\$target_path"
+  target_path="\$arg"
+done
+
+step="other"
+case "\$source_path" in
+*/previous.*/*) step="restore" ;;
+*/.sss-ssh-keygen.*/*)
+  case "\$target_path" in
+  *.pub) step="install-public" ;;
+  *) step="install-private" ;;
+  esac
+  ;;
+esac
+
+case " \${SSS_TEST_MV_FAIL:-} " in
+*" \$step "*)
+  printf 'stub mv failure: %s\n' "\$step" >&2
+  exit 1
+  ;;
+esac
+
+"$real_mv" "\$@" || exit 1
+
+case " \${SSS_TEST_MV_TERM_AFTER:-} " in
+*" \$step "*) kill -TERM "\$PPID" ;;
+esac
+exit 0
+EOF
+
+  cat >"$bin_dir/ln" <<EOF
+#!/bin/sh
+if [ "\${SSS_TEST_LN_FAIL:-0}" = "1" ] && [ "\$1" != "-s" ]; then
+  printf 'stub ln failure\n' >&2
+  exit 1
+fi
+exec "$real_ln" "\$@"
+EOF
+
+  cat >"$bin_dir/cp" <<EOF
+#!/bin/sh
+if [ "\${SSS_TEST_CP_FAIL:-0}" = "1" ]; then
+  printf 'stub cp failure\n' >&2
+  exit 1
+fi
+exec "$real_cp" "\$@"
+EOF
+
+  chmod +x "$bin_dir/mv" "$bin_dir/ln" "$bin_dir/cp"
+}
+
+staging_leftovers() {
+  find "$1" -name '.sss-ssh-keygen.*'
+}
+
 run_case() {
   local name="$1"
   shift
@@ -757,6 +828,7 @@ case_force_overwrite_replaces_after_success() {
   assert_equals "stub-private" "$(tr -d '\n' <"$target")" "private key should be replaced after success"
   assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "public key should be replaced after success"
   assert_contains "Replaced key material at $target and ${target}.pub" "$out" "overwrite success should report the final key paths"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "overwrite success should not leave staging files behind"
 }
 
 case_force_overwrite_honors_passthrough_output() {
@@ -1289,6 +1361,220 @@ case_symlinked_script_finds_config() {
   assert_contains "profile: rsa3072" "$out" "a config next to the invoked link should win over the ones behind it"
 }
 
+case_force_overwrite_restores_after_failed_rename() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed public key rename should fail the overwrite"
+  assert_contains "the previous state was restored and the new key pair was discarded" "$err" "a failed public key rename should report the rollback"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a failed public key rename should restore the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a failed public key rename should leave the public key in place"
+  assert_not_contains "Replaced key material" "$out" "a failed public key rename should not report success"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a rolled back overwrite should not leave staging files behind"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-private" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed private key rename should fail the overwrite"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a failed private key rename should leave the private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a failed private key rename should not touch the public key"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a failed private key rename should not leave staging files behind"
+
+  rm -f "${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail when only a private key existed"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a lone private key should be restored"
+  assert_not_exists "${target}.pub" "a rolled back overwrite should not create a public key"
+
+  rm -f "$target"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail when no key existed"
+  assert_not_exists "$target" "a rolled back overwrite should not leave half of a new pair"
+  assert_not_exists "${target}.pub" "a rolled back overwrite should not leave a new public key"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a rolled back first-time key should not leave staging files behind"
+}
+
+case_force_overwrite_keeps_material_when_rollback_fails() {
+  local tmp bin home target out err rc staging saved
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public restore" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rollback should fail the overwrite"
+  assert_contains "the previous files could not be restored" "$err" "a failed rollback should be reported"
+  assert_contains "ssh-keygen -y -f $target" "$err" "a failed rollback should explain how to rebuild the public key"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "the fixture should leave the new private key in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "the fixture should leave the old public key in place"
+
+  staging="$(staging_leftovers "$home/.ssh")"
+  saved="$(find "$home/.ssh" -path '*/previous.*/private')"
+  assert_contains "Previous files that were replaced are kept in $staging/previous." "$err" "a failed rollback should name the directory with the previous files"
+  assert_contains "New files that were not installed are kept in $staging" "$err" "a failed rollback should name the directory with the new files"
+  if [[ -f "$saved" ]]; then
+    assert_equals "old-private" "$(tr -d '\n' <"$saved")" "a failed rollback should keep the previous private key"
+  else
+    record_failure "a failed rollback should keep the previous private key on disk"
+  fi
+  if [[ -f "$staging/id_ed25519.pub" ]]; then
+    assert_equals "stub-public" "$(tr -d '\n' <"$staging/id_ed25519.pub")" "a failed rollback should keep the new public key"
+  else
+    record_failure "a failed rollback should keep the new public key on disk"
+  fi
+}
+
+case_force_overwrite_handles_symlink_targets() {
+  local tmp bin home target out err rc vault_key
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  vault_key="$tmp/vault/id_ed25519"
+  mkdir -p "$tmp/vault"
+  printf 'vault-private\n' >"$vault_key"
+  ln -s "$vault_key" "$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail when the private key is a symlink"
+  if [[ -L "$target" ]]; then
+    assert_equals "$vault_key" "$(readlink "$target")" "a rolled back overwrite should restore the symlink target"
+  else
+    record_failure "a rolled back overwrite should restore the symlink itself"
+  fi
+  assert_equals "vault-private" "$(tr -d '\n' <"$vault_key")" "a rolled back overwrite should not touch the file behind the symlink"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a rolled back overwrite should leave the public key next to the symlink"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "overwriting a symlinked private key should succeed"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "overwriting a symlinked private key should install the new key"
+  assert_equals "vault-private" "$(tr -d '\n' <"$vault_key")" "overwriting a symlinked private key should replace the link, not the file behind it"
+}
+
+case_force_overwrite_rollback_without_hard_links() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_LN_FAIL="1" SSS_TEST_MV_FAIL="install-public" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "a failed rename should fail without hard links"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "a copied backup should restore the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "a copied backup should leave the public key in place"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a copied backup should be cleaned up after the rollback"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_LN_FAIL="1" SSS_TEST_CP_FAIL="1" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "the overwrite should be refused when the previous key cannot be saved"
+  assert_contains "Unable to save $target for rollback; existing key material was left untouched" "$err" "an unsaved previous key should be reported"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an unsaved previous key should stay in place"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an unsaved previous key should keep its public key"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a refused overwrite should not leave staging files behind"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_LN_FAIL="1" \
+    run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "the overwrite should succeed without hard links"
+  assert_equals "stub-private" "$(tr -d '\n' <"$target")" "the overwrite should install the private key without hard links"
+  assert_equals "stub-public" "$(tr -d '\n' <"${target}.pub")" "the overwrite should install the public key without hard links"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "a copied backup should be removed after a successful overwrite"
+}
+
+case_force_overwrite_restores_when_interrupted() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  write_swap_fault_shims "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  printf 'old-private\n' >"$target"
+  printf 'old-public\n' >"${target}.pub"
+
+  # The subshell keeps the shell's "Terminated" notice out of the test output.
+  (
+    PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_TERM_AFTER="install-private" \
+      run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  ) 2>/dev/null
+  rc=$?
+  assert_equals "143" "$rc" "a wrapper terminated between the renames should die from the signal"
+  assert_contains "Interrupted while replacing the key material at $target; the previous state was restored" "$err" "an interrupted overwrite should report the rollback"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an overwrite interrupted between the renames should restore the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an overwrite interrupted between the renames should keep the public key"
+  assert_equals "" "$(staging_leftovers "$home/.ssh")" "an interrupted overwrite should not leave staging files behind"
+
+  (
+    PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_MV_TERM_AFTER="install-public" \
+      run_isolated_wrapper --force-overwrite >"$out" 2>"$err"
+  ) 2>/dev/null
+  rc=$?
+  assert_equals "143" "$rc" "a wrapper terminated after the second rename should die from the signal"
+  assert_equals "old-private" "$(tr -d '\n' <"$target")" "an overwrite interrupted before it finished should restore the private key"
+  assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "an overwrite interrupted before it finished should restore the public key"
+}
+
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1338,6 +1624,11 @@ run_case "passthrough empty output is rejected" case_passthrough_empty_output_is
 run_case "passthrough key type keeps wrapper defaults" case_passthrough_key_type_keeps_wrapper_defaults
 run_case "output overrides a less specific suffix" case_output_overrides_less_specific_suffix
 run_case "symlinked script finds config" case_symlinked_script_finds_config
+run_case "overwrite restores after a failed rename" case_force_overwrite_restores_after_failed_rename
+run_case "overwrite keeps material when rollback fails" case_force_overwrite_keeps_material_when_rollback_fails
+run_case "overwrite handles symlink targets" case_force_overwrite_handles_symlink_targets
+run_case "overwrite rollback without hard links" case_force_overwrite_rollback_without_hard_links
+run_case "overwrite restores when interrupted" case_force_overwrite_restores_when_interrupted
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2
