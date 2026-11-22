@@ -1076,6 +1076,27 @@ case_managed_dir_special_bits_do_not_warn() {
   assert_not_contains "Correcting permissions" "$err" "a setgid 700 managed dir should not be reported as needing repair"
 }
 
+case_passthrough_output_bypasses_home() {
+  local tmp target out err rc
+
+  tmp="$(new_tempdir)"
+  target="$tmp/custom/id_ed25519"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -f "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "a passthrough -f should bypass HOME-based default resolution"
+  assert_contains "output: $target" "$out" "a passthrough -f should be reflected in dry-run output"
+
+  HOME="" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --dry-run -- -q >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "passthrough arguments without -f should still need HOME"
+  assert_contains "HOME must be set" "$err" "passthrough arguments without -f should report the missing HOME"
+}
+
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1120,6 +1141,7 @@ run_case "inherited state variables are ignored" case_inherited_state_variables_
 run_case "dangling symlink output is refused" case_dangling_symlink_output_is_refused
 run_case "overwrite requires both key files" case_force_overwrite_requires_both_key_files
 run_case "managed dir special bits do not warn" case_managed_dir_special_bits_do_not_warn
+run_case "passthrough output bypasses HOME" case_passthrough_output_bypasses_home
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2

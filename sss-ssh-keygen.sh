@@ -582,7 +582,7 @@ resolve_default_output_dir() {
   fi
 
   [[ -n "${HOME:-}" ]] ||
-    die "HOME must be set unless --output or SSH_KEYGEN_OUTPUT specifies a path"
+    die "HOME must be set unless --output, SSH_KEYGEN_OUTPUT, or a passthrough -f specifies a path"
 
   printf '%s/.ssh' "$HOME"
 }
@@ -779,7 +779,8 @@ derive_effective_keygen_overrides() {
   else
     effective_verify_required=0
   fi
-  effective_output="$output"
+  passthrough_output=""
+  passthrough_output_present=0
   forwarded_ssh_keygen_args=()
   forwarded_ssh_keygen_args_present=0
 
@@ -840,7 +841,8 @@ derive_effective_keygen_overrides() {
     f)
       # The wrapper passes its own -f, so only flags clustered ahead of this
       # one are forwarded.
-      effective_output="$value"
+      passthrough_output="$value"
+      passthrough_output_present=1
       if [[ -n "$flags" ]]; then
         append_forwarded_ssh_keygen_args "-$flags"
       fi
@@ -1032,7 +1034,17 @@ ssh:*) ;;
   ;;
 esac
 
-if [[ -z "$output" ]]; then
+if [[ "$extra_ssh_keygen_args_present" -eq 1 ]]; then
+  derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
+else
+  derive_effective_keygen_overrides
+fi
+
+# A passthrough -f is settled first so that the default directory, and with it
+# HOME, is only needed when nothing else names the output.
+if [[ "$passthrough_output_present" -eq 1 ]]; then
+  output="$passthrough_output"
+elif [[ -z "$output" ]]; then
   managed_output_dir="$(resolve_default_output_dir)"
   if [[ -n "$output_suffix" ]]; then
     output="$managed_output_dir/${default_output_basename}_${output_suffix}"
@@ -1044,13 +1056,6 @@ fi
 if [[ -z "$comment" ]]; then
   comment="$(build_default_comment)"
 fi
-
-if [[ "$extra_ssh_keygen_args_present" -eq 1 ]]; then
-  derive_effective_keygen_overrides "${extra_ssh_keygen_args[@]}"
-else
-  derive_effective_keygen_overrides
-fi
-output="$effective_output"
 
 # Config values and quoted arguments are taken literally, so an unexpanded
 # ~ or $VAR prefix would create a directory of that name under the current one.
