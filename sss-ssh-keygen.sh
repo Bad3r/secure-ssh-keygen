@@ -1104,8 +1104,12 @@ if [[ "$force_overwrite" -eq 1 ]]; then
   [[ -d "${output}.pub" ]] && die "Refusing to overwrite directory target: ${output}.pub"
 fi
 
-if [[ -e "$output" || -e "${output}.pub" ]] && [[ "$force_overwrite" -ne 1 ]]; then
-  die "Refusing to overwrite existing key material at $output. Use --force-overwrite if replacement is intentional."
+# -L catches dangling symlinks, which -e reports as absent and ssh-keygen
+# would write through.
+if [[ "$force_overwrite" -ne 1 ]]; then
+  if [[ -e "$output" || -L "$output" || -e "${output}.pub" || -L "${output}.pub" ]]; then
+    die "Refusing to overwrite existing key material at $output. Use --force-overwrite if replacement is intentional."
+  fi
 fi
 
 temp_dir=""

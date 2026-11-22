@@ -1006,6 +1006,27 @@ case_inherited_state_variables_are_ignored() {
   assert_equals "old-private" "$(tr -d '\n' <"$target")" "inherited state variables should not replace the private key"
   assert_equals "old-public" "$(tr -d '\n' <"${target}.pub")" "inherited state variables should not replace the public key"
 }
+
+case_dangling_symlink_output_is_refused() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$tmp/keys/id_ed25519"
+  mkdir -p "$bin" "$home/.ssh" "$tmp/keys"
+  write_stub_binaries "$bin"
+  ln -s "$tmp/elsewhere" "$target"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    run_isolated_wrapper --output "$target" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "1" "$rc" "dangling symlink targets should be refused"
+  assert_contains "Refusing to overwrite existing key material at $target" "$err" "dangling symlink targets should report a clear error"
+  assert_not_exists "$tmp/elsewhere" "a private key should not be written through a dangling symlink"
+}
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1047,6 +1068,7 @@ run_case "output rejects unexpanded shell prefix" case_output_rejects_unexpanded
 run_case "passthrough option values are not reparsed" case_passthrough_option_values_are_not_reparsed
 run_case "passthrough clustered output is honored" case_passthrough_clustered_output_is_honored
 run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
+run_case "dangling symlink output is refused" case_dangling_symlink_output_is_refused
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2

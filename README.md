@@ -158,7 +158,8 @@ comment without replacing it entirely. Use `--comment` for a full override.
 
 - Passphrase prompting is the default. Use `--empty-passphrase` only for
   machine accounts or non-interactive workflows that require it.
-- Existing output paths are protected by default. Use `--force-overwrite` only
+- Existing output paths are protected by default, including dangling symlinks
+  that `ssh-keygen` would otherwise write through. Use `--force-overwrite` only
   when replacement is intentional.
 - The wrapper uses the OpenSSH private-key format and explicitly sets
   `aes256-ctr` for private-key encryption, matching current `ssh-keygen`
