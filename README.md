@@ -46,6 +46,12 @@ Generate the default software key:
 ./sss-ssh-keygen.sh
 ```
 
+Generate a named software key for a specific provider or account:
+
+```sh
+./sss-ssh-keygen.sh --output-suffix github_unsigned_sh --comment 'github <@> unsigned.sh'
+```
+
 Generate the default hardware-backed key:
 
 ```sh
@@ -66,15 +72,15 @@ Generate an RSA fallback key:
 
 ## Default profiles
 
-| Profile | Default algorithm | Intended use | Compatibility note |
-| --- | --- | --- | --- |
-| `ed25519` / `software` | `ed25519` | General-purpose software key | Preferred default for modern OpenSSH estates |
-| `hardware` | `ed25519-sk -O verify-required` | Modern FIDO-backed key with configurable FIDO algorithm | Defaults to `ed25519-sk`, can be switched to `ecdsa-sk` |
-| `fido-ed25519` | `ed25519-sk -O verify-required` | Fixed Ed25519 FIDO-backed key | Always uses `ed25519-sk` |
-| `fido-ecdsa` | `ecdsa-sk -O verify-required` | Hardware-backed compatibility path | Use for older authenticators or estates without `ed25519-sk` |
-| `rsa3072` / `compat` | `rsa -b 3072` | Conservative compatibility path | Uses RSA with SHA-2 signatures and forces 3072 bits |
-| `rsa4096` | `rsa -b 4096` | Policy-driven larger RSA key | Use only when an explicit standard requires it; forces 4096 bits |
-| `fips` | `rsa -b 3072` | FIPS-oriented or policy-constrained estate | Provided as an explicit RSA alias |
+| Profile                | Default algorithm               | Intended use                                            | Compatibility note                                               |
+| ---------------------- | ------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------- |
+| `ed25519` / `software` | `ed25519`                       | General-purpose software key                            | Preferred default for modern OpenSSH estates                     |
+| `hardware`             | `ed25519-sk -O verify-required` | Modern FIDO-backed key with configurable FIDO algorithm | Defaults to `ed25519-sk`, can be switched to `ecdsa-sk`          |
+| `fido-ed25519`         | `ed25519-sk -O verify-required` | Fixed Ed25519 FIDO-backed key                           | Always uses `ed25519-sk`                                         |
+| `fido-ecdsa`           | `ecdsa-sk -O verify-required`   | Hardware-backed compatibility path                      | Use for older authenticators or estates without `ed25519-sk`     |
+| `rsa3072` / `compat`   | `rsa -b 3072`                   | Conservative compatibility path                         | Uses RSA with SHA-2 signatures and forces 3072 bits              |
+| `rsa4096`              | `rsa -b 4096`                   | Policy-driven larger RSA key                            | Use only when an explicit standard requires it; forces 4096 bits |
+| `fips`                 | `rsa -b 3072`                   | FIPS-oriented or policy-constrained estate              | Provided as an explicit RSA alias                                |
 
 The shipped defaults are:
 
@@ -99,6 +105,7 @@ Supported configuration variables include:
 
 - `SSH_KEYGEN_PROFILE`
 - `SSH_KEYGEN_OUTPUT`
+- `SSH_KEYGEN_OUTPUT_SUFFIX`
 - `SSH_KEYGEN_COMMENT`
 - `SSH_KEYGEN_COMMENT_USER`
 - `SSH_KEYGEN_COMMENT_HOST`
@@ -127,6 +134,16 @@ To use a different config file for a specific run:
 
 Use `--use-xdg-output` when you want the default output path under
 `$XDG_CONFIG_HOME/ssh` or, if that is unset, `$HOME/.config/ssh`.
+
+Use `--output-suffix` or `SSH_KEYGEN_OUTPUT_SUFFIX` to keep the
+profile-specific basename while adding a provider, account, or purpose slug.
+For example, `--output-suffix github_unsigned_sh` creates
+`id_ed25519_github_unsigned_sh` for the default software profile and
+`id_ed25519_sk_github_unsigned_sh` for the default hardware profile. Suffixes
+must start with a letter or digit and may contain only letters, digits, dots,
+underscores, and hyphens. Two consecutive dots are rejected. Use
+`--output PATH` instead when you need an exact path; it cannot be combined with
+an output suffix.
 
 The generated comment defaults to `user@host - YYYY-MM-DD`. Use
 `--comment-user`, `--comment-host`, or `--comment-email` to refine the auto

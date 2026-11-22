@@ -520,6 +520,94 @@ case_output_override_beats_xdg_toggle() {
   assert_contains "$target" "$out" "explicit output should be preserved"
 }
 
+case_output_suffix_names_default_key() {
+  local tmp home target out err rc
+
+  tmp="$(new_tempdir)"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519_github_unsigned_sh"
+  mkdir -p "$home"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_wrapper --output-suffix github_unsigned_sh --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "output suffix should name the default key"
+  assert_contains "output: $target" "$out" "output suffix should append to the default basename"
+  assert_contains "-f $target" "$out" "output suffix should flow into the ssh-keygen command"
+}
+
+case_output_suffix_names_hardware_key() {
+  local tmp bin home target out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519_sk_github_unsigned_sh"
+  mkdir -p "$bin" "$home"
+  write_stub_binaries "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" \
+    SSS_TEST_SSH_VERSION="OpenSSH_10.2p1, OpenSSL test" \
+    run_wrapper --profile hardware --output-suffix github_unsigned_sh --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "output suffix should name hardware keys"
+  assert_contains "output: $target" "$out" "hardware suffix should append to the hardware basename"
+}
+
+case_config_output_suffix() {
+  local tmp cfg home target out err rc
+
+  tmp="$(new_tempdir)"
+  cfg="$tmp/custom.conf"
+  home="$tmp/home"
+  target="$home/.ssh/id_ed25519_github_unsigned_sh"
+  mkdir -p "$home"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_PROFILE=ed25519
+SSH_KEYGEN_OUTPUT_SUFFIX=github_unsigned_sh
+EOF
+
+  HOME="$home" USER="alice" HOSTNAME="host" \
+    run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "config output suffix should be accepted"
+  assert_contains "output: $target" "$out" "config output suffix should append to the default basename"
+}
+
+case_output_suffix_rejects_invalid_slug() {
+  local tmp out err rc
+
+  tmp="$(new_tempdir)"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  run_wrapper --output-suffix ../bad --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "invalid output suffix should exit 2"
+  assert_contains "--output-suffix must use only letters, digits, dot, underscore, or hyphen" "$err" "invalid output suffix should explain allowed characters"
+}
+
+case_output_suffix_rejects_output_conflict() {
+  local tmp target out err rc
+
+  tmp="$(new_tempdir)"
+  target="$tmp/custom/id_ed25519"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  run_wrapper --output "$target" --output-suffix github_unsigned_sh --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "output suffix should reject explicit output conflicts"
+  assert_contains "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path" "$err" "output suffix conflict should be clear"
+}
+
 case_comment_builder_supports_email() {
   local tmp out err rc
 
@@ -527,10 +615,10 @@ case_comment_builder_supports_email() {
   out="$tmp/out"
   err="$tmp/err"
 
-  USER="alice" HOSTNAME="builder" run_wrapper --comment-email alice@example.com --dry-run >"$out" 2>"$err"
+  USER="alice" HOSTNAME="builder" run_wrapper --comment-email alice@example.test --dry-run >"$out" 2>"$err"
   rc=$?
   assert_equals "0" "$rc" "comment email should succeed"
-  assert_contains "alice@builder\\ -\\ alice@example.com\\ -" "$out" "comment email should appear in the generated comment"
+  assert_contains "alice@builder\\ -\\ alice@example.test\\ -" "$out" "comment email should appear in the generated comment"
 }
 
 case_filesystem_utils_stay_portable_without_double_dash() {
@@ -772,6 +860,11 @@ run_case "env output override" case_env_output_override
 run_case "empty HOME fails" case_home_empty_fails
 run_case "xdg toggle fallback" case_xdg_toggle_uses_fallback
 run_case "output override beats xdg toggle" case_output_override_beats_xdg_toggle
+run_case "output suffix names default key" case_output_suffix_names_default_key
+run_case "output suffix names hardware key" case_output_suffix_names_hardware_key
+run_case "config output suffix" case_config_output_suffix
+run_case "output suffix rejects invalid slug" case_output_suffix_rejects_invalid_slug
+run_case "output suffix rejects output conflict" case_output_suffix_rejects_output_conflict
 run_case "comment builder supports email" case_comment_builder_supports_email
 run_case "filesystem utils stay portable without double dash" case_filesystem_utils_stay_portable_without_double_dash
 run_case "fido version gates" case_fido_version_gates

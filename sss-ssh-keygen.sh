@@ -16,6 +16,7 @@ declare -ar VALID_PROFILES=(
 declare -ar MERGE_FIELDS=(
   profile
   output
+  output_suffix
   comment
   comment_user
   comment_host
@@ -73,6 +74,7 @@ Options:
   --profile PROFILE            ed25519 | software | fido-ecdsa | hardware
                                | fido-ed25519 | rsa3072 | compat | rsa4096 | fips
   --output PATH                private key output path
+  --output-suffix TEXT         append TEXT to the default output basename
   --comment TEXT               full key comment override
   --comment-user TEXT          override the generated comment username
   --comment-host TEXT          override the generated comment hostname
@@ -100,6 +102,7 @@ Config:
   Config files are parsed as assignment-only files. Supported variables:
     SSH_KEYGEN_PROFILE
     SSH_KEYGEN_OUTPUT
+    SSH_KEYGEN_OUTPUT_SUFFIX
     SSH_KEYGEN_COMMENT
     SSH_KEYGEN_COMMENT_USER
     SSH_KEYGEN_COMMENT_HOST
@@ -231,6 +234,7 @@ config_field_for_key() {
   case "$1" in
   SSH_KEYGEN_PROFILE) printf 'profile' ;;
   SSH_KEYGEN_OUTPUT) printf 'output' ;;
+  SSH_KEYGEN_OUTPUT_SUFFIX) printf 'output_suffix' ;;
   SSH_KEYGEN_COMMENT) printf 'comment' ;;
   SSH_KEYGEN_COMMENT_USER) printf 'comment_user' ;;
   SSH_KEYGEN_COMMENT_HOST) printf 'comment_host' ;;
@@ -328,6 +332,18 @@ parse_cli() {
       ;;
     --output=*)
       set_cli_value "output" "${1#*=}"
+      shift
+      ;;
+    --output-suffix)
+      (($# >= 2)) || usage_error "--output-suffix requires a value"
+      [[ -n "$2" ]] || usage_error "--output-suffix requires a value"
+      set_cli_value "output_suffix" "$2"
+      shift 2
+      ;;
+    --output-suffix=*)
+      option_value="${1#*=}"
+      [[ -n "$option_value" ]] || usage_error "--output-suffix requires a value"
+      set_cli_value "output_suffix" "$option_value"
       shift
       ;;
     --comment)
@@ -477,6 +493,7 @@ capture_env_value() {
 capture_env_values() {
   capture_env_value "SSH_KEYGEN_PROFILE" "profile"
   capture_env_value "SSH_KEYGEN_OUTPUT" "output"
+  capture_env_value "SSH_KEYGEN_OUTPUT_SUFFIX" "output_suffix"
   capture_env_value "SSH_KEYGEN_COMMENT" "comment"
   capture_env_value "SSH_KEYGEN_COMMENT_USER" "comment_user"
   capture_env_value "SSH_KEYGEN_COMMENT_HOST" "comment_host"
@@ -607,6 +624,19 @@ repair_managed_dir_permissions() {
     warn "Correcting permissions on $directory to 700"
     chmod 700 "$(normalize_path_arg "$directory")"
   fi
+}
+
+validate_output_suffix() {
+  local suffix="$1"
+
+  [[ -n "$suffix" ]] ||
+    usage_error "--output-suffix requires a value"
+
+  [[ "$suffix" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+    usage_error "--output-suffix must use only letters, digits, dot, underscore, or hyphen and must start with a letter or digit"
+
+  [[ "$suffix" != *..* ]] ||
+    usage_error "--output-suffix must not contain '..'"
 }
 
 resolve_identity_user() {
@@ -851,6 +881,7 @@ comment_user=""
 comment_host=""
 comment_email=""
 output=""
+output_suffix=""
 empty_passphrase="0"
 quiet="0"
 dry_run="0"
@@ -872,6 +903,12 @@ require_boolean "$force_overwrite" "--force-overwrite"
 require_boolean "$use_xdg_output" "SSH_KEYGEN_USE_XDG_OUTPUT"
 require_boolean "$fido_verify_required" "SSH_KEYGEN_FIDO_VERIFY_REQUIRED"
 require_boolean "$fido_resident" "SSH_KEYGEN_FIDO_RESIDENT"
+
+if [[ -n "$output_suffix" ]]; then
+  validate_output_suffix "$output_suffix"
+  [[ -z "$output" ]] ||
+    usage_error "--output-suffix cannot be used when --output or SSH_KEYGEN_OUTPUT specifies a path"
+fi
 
 if [[ ! "$rounds" =~ ^[0-9]+$ ]] || [[ "$rounds" -lt 1 ]]; then
   usage_error "Invalid rounds value: $rounds"
@@ -942,7 +979,11 @@ esac
 
 if [[ -z "$output" ]]; then
   managed_output_dir="$(resolve_default_output_dir)"
-  output="$managed_output_dir/$default_output_basename"
+  if [[ -n "$output_suffix" ]]; then
+    output="$managed_output_dir/${default_output_basename}_${output_suffix}"
+  else
+    output="$managed_output_dir/$default_output_basename"
+  fi
 fi
 
 if [[ -z "$comment" ]]; then
