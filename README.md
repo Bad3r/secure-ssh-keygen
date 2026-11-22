@@ -145,6 +145,11 @@ underscores, and hyphens. Two consecutive dots are rejected. Use
 `--output PATH` instead when you need an exact path; it cannot be combined with
 an output suffix.
 
+Output paths are used literally. A config file is not shell-expanded, so
+`SSH_KEYGEN_OUTPUT=~/.ssh/id_work` or a value that starts with `$` is rejected
+instead of creating a directory with that name. Give a full path, or prefix
+`./` when such a name is intentional.
+
 The generated comment defaults to `user@host - YYYY-MM-DD`. Use
 `--comment-user`, `--comment-host`, or `--comment-email` to refine the auto
 comment without replacing it entirely. Use `--comment` for a full override.

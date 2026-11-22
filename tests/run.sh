@@ -884,6 +884,44 @@ case_numeric_values_use_base_ten() {
   assert_not_contains "value too great for base" "$err" "zero-padded values should not be read as octal"
 }
 
+case_output_rejects_unexpanded_shell_prefix() {
+  local tmp cfg out err rc
+
+  tmp="$(new_tempdir)"
+  cfg="$tmp/custom.conf"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT=~/.ssh/id_work
+EOF
+
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "literal tilde output should exit 2"
+  assert_contains "Output path is not shell-expanded: ~/.ssh/id_work" "$err" "literal tilde output should be reported"
+
+  cat >"$cfg" <<'EOF'
+SSH_KEYGEN_OUTPUT="$HOME/.ssh/id_work"
+EOF
+
+  run_wrapper --config "$cfg" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "literal variable output should exit 2"
+  assert_contains "Output path is not shell-expanded" "$err" "literal variable output should be reported"
+
+  run_wrapper --output "./~literal" --dry-run >"$out" 2>"$err"
+  rc=$?
+  assert_equals "0" "$rc" "an explicit ./ prefix should keep literal names usable"
+  assert_contains "output: ./~literal" "$out" "an explicit ./ prefix should be preserved"
+
+  # The shell leaves a tilde in the middle of a word alone.
+  run_wrapper --dry-run -- -f~/.ssh/id_work >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "literal tilde passthrough output should exit 2"
+  assert_contains "Output path is not shell-expanded: ~/.ssh/id_work" "$err" "literal tilde passthrough output should be reported"
+}
+
 case_inherited_state_variables_are_ignored() {
   local tmp bin home target out err rc
 
@@ -949,6 +987,7 @@ run_case "overwrite rejects public directory targets" case_force_overwrite_rejec
 run_case "managed dir warning and repair" case_managed_dir_permissions_warn_and_fix
 run_case "explicit managed output repairs parent dir" case_explicit_managed_output_repairs_parent_dir
 run_case "numeric values use base ten" case_numeric_values_use_base_ten
+run_case "output rejects unexpanded shell prefix" case_output_rejects_unexpanded_shell_prefix
 run_case "inherited state variables are ignored" case_inherited_state_variables_are_ignored
 
 if [[ "$failures" -gt 0 ]]; then

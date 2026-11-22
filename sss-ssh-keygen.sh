@@ -1013,8 +1013,17 @@ if [[ "$extra_ssh_keygen_args_present" -eq 1 ]]; then
 else
   derive_effective_keygen_overrides
 fi
-validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
 output="$effective_output"
+
+# Config values and quoted arguments are taken literally, so an unexpanded
+# ~ or $VAR prefix would create a directory of that name under the current one.
+case "$output" in
+'~'* | '$'*)
+  usage_error "Output path is not shell-expanded: $output. Use a full path, or prefix ./ if the name is intentional"
+  ;;
+esac
+
+validate_fido_version_requirements "$effective_key_type" "$effective_verify_required"
 output_dir="$(dirname "$(normalize_path_arg "$output")")"
 managed_output_dir="$(resolve_managed_ssh_root_for_output_dir "$output_dir" 2>/dev/null || true)"
 
