@@ -1097,6 +1097,31 @@ case_passthrough_output_bypasses_home() {
   assert_contains "HOME must be set" "$err" "passthrough arguments without -f should report the missing HOME"
 }
 
+case_passthrough_empty_output_is_rejected() {
+  local tmp bin home out err rc
+
+  tmp="$(new_tempdir)"
+  bin="$tmp/bin"
+  home="$tmp/home"
+  mkdir -p "$bin" "$home/.ssh"
+  write_stub_binaries "$bin"
+  out="$tmp/out"
+  err="$tmp/err"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_LOG="$tmp/keygen.log" \
+    run_isolated_wrapper -- -f "" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an empty passthrough -f should exit 2"
+  assert_contains "The passthrough -f option requires a non-empty path" "$err" "an empty passthrough -f should be reported"
+  assert_not_exists "$tmp/keygen.log" "an empty passthrough -f should not reach ssh-keygen"
+
+  PATH="$bin:$PATH" HOME="$home" USER="alice" HOSTNAME="host" SSS_TEST_SSH_KEYGEN_LOG="$tmp/keygen.log" \
+    run_isolated_wrapper -- -qf "" >"$out" 2>"$err"
+  rc=$?
+  assert_equals "2" "$rc" "an empty clustered passthrough -f should exit 2"
+  assert_not_exists "$tmp/keygen.log" "an empty clustered passthrough -f should not reach ssh-keygen"
+}
+
 run_case "no bash4 associative arrays" case_no_bash4_assoc_arrays
 run_case "no GNU-only double dash for path utils" case_no_gnu_only_double_dash_for_path_utils
 run_case "missing profile value" case_missing_profile_value
@@ -1142,6 +1167,7 @@ run_case "dangling symlink output is refused" case_dangling_symlink_output_is_re
 run_case "overwrite requires both key files" case_force_overwrite_requires_both_key_files
 run_case "managed dir special bits do not warn" case_managed_dir_special_bits_do_not_warn
 run_case "passthrough output bypasses HOME" case_passthrough_output_bypasses_home
+run_case "passthrough empty output is rejected" case_passthrough_empty_output_is_rejected
 
 if [[ "$failures" -gt 0 ]]; then
   printf 'FAILED %s/%s tests (%s assertions)\n' "$failed_test_count" "$test_count" "$failures" >&2

@@ -841,6 +841,8 @@ derive_effective_keygen_overrides() {
     f)
       # The wrapper passes its own -f, so only flags clustered ahead of this
       # one are forwarded.
+      [[ -n "$value" ]] ||
+        usage_error "The passthrough -f option requires a non-empty path"
       passthrough_output="$value"
       passthrough_output_present=1
       if [[ -n "$flags" ]]; then
